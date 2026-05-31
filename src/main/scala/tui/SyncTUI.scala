@@ -1,7 +1,7 @@
 package tui
 
 import schema.DBUtil.{DBConf, createHikariDataSource}
-import schema.SchemaCompare.{checkGrant, compareSchemas, fetchSchema, jsonCodec}
+import schema.SchemaCompare.{compareSchemas, fetchSchema, jsonCodec}
 import schema.SchemaCompared._
 import schema.{SchemaCompared, TableInfo}
 import tui.layoutzEx.InputPrompt._
@@ -92,11 +92,20 @@ object SyncTUI {
         // main conf
         // ----------------------------------------------
         val confPath = "conf.json"
-        var dbconf1: Option[DBConf] = None
-        var dbconf2: Option[DBConf] = None
+        var dbconf1: Option[DBConf] = Some( DBConf(
+          url = "jdbc:oracle:thin:@arkdata.iptime.org:1523/XE",
+          //              url = "jdbc:oracle:thin:@arkdata.iptime.org:1521/ORCLPDB1",
+          user = "CDCTEST",
+          pass = "CDCTEST"))
+        var dbconf2: Option[DBConf] = Some( DBConf(
+          //              url = "jdbc:oracle:thin:@arkdata.iptime.org:1524/XE",
+          url = "jdbc:oracle:thin:@arkdata.iptime.org:1522/ORCLPDB1",
+          user = "CDCTEST",
+          pass = "CDCTEST") )
+
         var dataSource1: Option[DataSource] = None
         var dataSource2: Option[DataSource] = None
-        var schemaCompared: Option[SchemaCompared] = None
+        var Compared: Option[SchemaCompared] = None
         // ----------------------------------------------
 
         @volatile var exit: Boolean = false
@@ -109,24 +118,25 @@ object SyncTUI {
           term.exitRawMode()
         }
 
-        def inputConf(kind: String, show: String => Unit, inst: RuntimeShellInstance) = {
+        def inputConf(kind: String, show: String => Unit, c: Option[DBConf], inst: RuntimeShellInstance) = {
           val conf = {
             readLineSeq(inst.term, Seq(
-              s"conf/$kind"  -> "? url ? ".color(Color.Green).render -> false,
-              ""  -> "? id  ? ".color(Color.Green).render -> false,
-              ""  -> "? pwd ? ".color(Color.Green).render -> true,
+              (s"DB connect setting ($kind)", "? url ? ".color(Color.Green).render, c.map(_.url)) -> false,
+              ("", "? id  ? ".color(Color.Green).render, c.map(_.user)) -> false,
+              ("", "? pwd ? ".color(Color.Green).render, c.map(_.pass)) -> true,
             ))
           }
           val cs: Seq[Seq[Element]] = Seq( Seq( conf(0), conf(1), conf(2).map(_ => '*')) )
 
-          val tbl = layout( kind.color(Color.Red), table(Seq( "url", "id", "pwd"), cs ) )
+          val tbl = layout( "", s"-- your setting for $kind ---", table(Seq( "url", "id", "pwd"), cs ) )
           show( tbl.render)
 
-          val isOk = readNotEmpty(inst.term, "is this " + "ok?".color(Color.Red).render, "y/n ?", false)
+          val isOk = readNotEmpty(inst.term, "", "? is ok (yes/no) ? ".color(Color.Red).render, Some("yes"), false)
 
-          if(isOk.toLowerCase.startsWith("y"))
+          if(isOk.toLowerCase.startsWith("y")) {
+            show( s"DB connect setting($kind) is updated.")
             Some(conf)
-          else
+          } else
             None
         }
 
@@ -138,17 +148,6 @@ object SyncTUI {
 
           val js = JobSpinner.jobSpinner[Option[String]]("loading".color(Color.Cyan).render)
           Future {
-            dbconf1 = Some( DBConf(
-              url = "jdbc:oracle:thin:@arkdata.iptime.org:1523/XE",
-//              url = "jdbc:oracle:thin:@arkdata.iptime.org:1521/ORCLPDB1",
-              user = "CDCTEST",
-              pass = "CDCTEST"))
-            dbconf2 = Some( DBConf(
-//              url = "jdbc:oracle:thin:@arkdata.iptime.org:1524/XE",
-              url = "jdbc:oracle:thin:@arkdata.iptime.org:1522/ORCLPDB1",
-              user = "CDCTEST",
-              pass = "CDCTEST") )
-
             if (dataSource1.isEmpty) {
               js.setMessage("1. create connection pool for source ")
               dataSource1 = Some(createHikariDataSource(dbconf1.get))
@@ -175,28 +174,14 @@ object SyncTUI {
               } yield {
                 val con1 = ds1.getConnection
                 val con2 = ds2.getConnection
-                val schema1 = {
-                  js.setMessage("1. fetch schema from source")
-                  fetchSchema(ds1, dbconf1.map(_.user).get)
-                }
-                val schema2 = {
-                  js.setMessage("2. fetch schema from target")
-                  fetchSchema(ds2, dbconf2.map(_.user).get)
-                }
-                val cs = {
-                  js.setMessage("3. compare and analyze schemas...")
-                  compareSchemas(schema1, schema2)
-                }
-                val out = {
-                  js.setMessage("4. check privileges to LOB hash")
-                  checkGrant(ds1, ds2, cs)
-                }
-
+                val schema1 = fetchSchema(ds1, dbconf1.map(_.user).get, s => js.setMessage("STEP1 " + s))
+                val schema2 = fetchSchema(ds2, dbconf2.map(_.user).get, s => js.setMessage("STEP2 " + s))
+                val out = compareSchemas(schema1, schema2, s => js.setMessage("STEP3 " + s))
                 con1.close()
                 con2.close()
                 out
               }
-              js.setFinished(ret.orNull)
+              js.setFinished( ret.orNull)
             }
             js.run(clearOnStart= false, clearOnExit = false, terminal= Some(inst.term))
           }
@@ -230,7 +215,7 @@ object SyncTUI {
             val b = Files.readAllBytes(p)
             val s = new String(b, StandardCharsets.UTF_8)
             val o = s.fromJson[SchemaCompared]
-            schemaCompared = o.toOption
+            Compared = o.toOption
             show(o.fold(l => "load failed: conf.json", r => "conf.json is loaded."))
           }
           if(out.isEmpty)
@@ -275,7 +260,11 @@ object SyncTUI {
         }
 
         def startPlan(o: SchemaCompared, show: String => Unit, inst: RuntimeShellInstance,
-                      count: Option[Int], compDebug: Boolean = false, applyTarget: Boolean = false, applDebug: Boolean = false): Unit = {
+                      count: Option[Int],
+                      compDebug: Boolean = false,
+                      applyTarget: Boolean = false,
+                      exceptSame: Boolean = false,
+                      applDebug: Boolean = false): Unit = {
 
           val selected = selectPlans(o, inst)
           if(selected.isEmpty) {
@@ -285,17 +274,17 @@ object SyncTUI {
 
           selected.foreach(p => {
             show( rowElements(p.table).map(_.render).mkString(" "))
-            p.goWith(dataSource1.get, dataSource2.get, count, compDebug, applyTarget, applDebug)
+            p.goWith(dataSource1.get, dataSource2.get, count, applyTarget, compDebug, applDebug, exceptSame)
           } )
         }
 
         def updateCount(show: String => Unit, inst: RuntimeShellInstance): Unit = {
 
-          if( schemaCompared.isEmpty || dataSource1.isEmpty || dataSource2.isEmpty) {
+          if( Compared.isEmpty || dataSource1.isEmpty || dataSource2.isEmpty) {
             show( "init first.")
             return
           }
-          val o: SchemaCompared = schemaCompared.get
+          val o: SchemaCompared = Compared.get
           val l = o.comparable
           if(l.isEmpty) { show("empty"); return }
 
@@ -316,7 +305,7 @@ object SyncTUI {
                   a
               }
             js.setMessage("done")
-            schemaCompared = Some(o.copy(comparable = updated))
+            Compared = Some(o.copy(comparable = updated))
             js.setFinished(updated)
           }
           val result = js.run(clearOnStart= false, clearOnExit = false, terminal= Some(inst.term))
@@ -329,64 +318,58 @@ object SyncTUI {
           def notLoaded = show("configuration not loaded. use: " + "init | load".color(Color.Green).render)
           def hashOn = show("if table contains LOB/CLOB/NCLOB, i'll compare it with hash.".color(Color.Red).render )
           def hashOff = show("i'll compare LOB/CLOB/NCLOB compare by contents")
+          def help = show("[help] " +
+            "source target connect init load save brief list ln lk count(cn) def dn dk p ps".color(Color.Green).render)
 
           cmd  match {
-            case "so"| "source" => inputConf("source", show, inst)    // todo
-            case "ta"| "target" => inputConf("target", show, inst)    // todo
+            case "so"| "source" => inputConf("source", show, dbconf1, inst)
+            case "ta"| "target" => inputConf("target", show, dbconf2, inst)
             case "co"| "connect"=> connect(show, inst)
             case "cn"| "count"  => updateCount(show, inst)
-            case "sa"| "save"   => schemaCompared.map(o => saveConf(o, show)).getOrElse(notLoaded)  // todo
+            case "sa"| "save"   => Compared.map(o => saveConf(o, show)).getOrElse(notLoaded)  // todo
             case "lo"| "load"   => loadConf(show)   // todo
-            case "b" | "brief"  => schemaCompared.map(o => show(summary(o))).getOrElse(notLoaded)
-            case "mka"          => schemaCompared.map(o => show(tableOfInfos(o.mismatchKey.map(_._1)))).getOrElse(notLoaded)
-            case "mkb"          => schemaCompared.map(o => show(tableOfInfos(o.mismatchKey.map(_._2)))).getOrElse(notLoaded)
-            case "mca"          => schemaCompared.map(o => show(tableOfInfos(o.mismatchCols.map(_._1)))).getOrElse(notLoaded)
-            case "mcb"          => schemaCompared.map(o => show(tableOfInfos(o.mismatchCols.map(_._2)))).getOrElse(notLoaded)
-            case "oa"           => schemaCompared.map(o => show(tableOfInfos(o.onlyInDb1))).getOrElse(notLoaded)
-            case "ob"           => schemaCompared.map(o => show(tableOfInfos(o.onlyInDb2))).getOrElse(notLoaded)
-            case "mkad"         => schemaCompared.map(o => detail(o.mismatchKey.map(_._1), show, inst)).getOrElse(notLoaded)
-            case "mkbd"         => schemaCompared.map(o => detail(o.mismatchKey.map(_._2), show, inst)).getOrElse(notLoaded)
-            case "mcad"         => schemaCompared.map(o => detail(o.mismatchCols.map(_._1), show, inst)).getOrElse(notLoaded)
-            case "mcbd"         => schemaCompared.map(o => detail(o.mismatchCols.map(_._2), show, inst)).getOrElse(notLoaded)
-            case "oad"          => schemaCompared.map(o => detail(o.onlyInDb1, show, inst)).getOrElse(notLoaded)
-            case "obd"          => schemaCompared.map(o => detail(o.onlyInDb2, show, inst)).getOrElse(notLoaded)
-            case "l" | "list"   => schemaCompared.map(o => show(tableOfInfos(o.comparable))).getOrElse(notLoaded)
-            case "ln"| "lnokey" => schemaCompared.map(o => show(tableOfInfos(o.filterNoKey))).getOrElse(notLoaded)
-            case "lk"| "lkey"   => schemaCompared.map(o => show(tableOfInfos(o.filterKey))).getOrElse(notLoaded)
-            case "d" | "def"    => schemaCompared.map(o => detail(o.comparable, show, inst)).getOrElse(notLoaded)
-            case "dn"| "dnokey" => schemaCompared.map(o => detail(o.filterNoKey, show, inst)).getOrElse(notLoaded)
-            case "dk"| "dkey"   => schemaCompared.map(o => detail(o.filterKey, show, inst)).getOrElse(notLoaded)
-
-            case "p" | "plan"   => schemaCompared.map(o => showPlan(o, show, inst)).getOrElse(notLoaded)
-            case "ps"| "pstart" => schemaCompared.map(o => startPlan(o, show, inst, Some(10))).getOrElse(notLoaded)
-            case "ps100"        => schemaCompared.map(o => startPlan(o, show, inst, Some(100))).getOrElse(notLoaded)
-            case "ps1k"         => schemaCompared.map(o => startPlan(o, show, inst, Some(1000))).getOrElse(notLoaded)
-            case "ps2k"         => schemaCompared.map(o => startPlan(o, show, inst, Some(2000))).getOrElse(notLoaded)
-            case "psa"          => schemaCompared.map(o => startPlan(o, show, inst, None)).getOrElse(notLoaded)
-            case "psd"          => schemaCompared.map(o => startPlan(o, show, inst, Some(5), true)).getOrElse(notLoaded)
-            case "pad"          => schemaCompared.map(o => startPlan(o, show, inst, None, false, true, true)).getOrElse(notLoaded)
-            case "paa"          => schemaCompared.map(o => startPlan(o, show, inst, None, false, true, false)).getOrElse(notLoaded)
-            case "hash"         => schemaCompared = schemaCompared.map( _.updatePlan(true)); hashOn
-            case "nohash"       => schemaCompared = schemaCompared.map( _.updatePlan(false)); hashOff
+            case "b" | "brief"  => Compared.map(o => show(summary(o))).getOrElse(notLoaded)
+            case "mka"          => Compared.map(o => show(tableOfInfos(o.mismatchKey.map(_._1)))).getOrElse(notLoaded)
+            case "mkb"          => Compared.map(o => show(tableOfInfos(o.mismatchKey.map(_._2)))).getOrElse(notLoaded)
+            case "mca"          => Compared.map(o => show(tableOfInfos(o.mismatchCols.map(_._1)))).getOrElse(notLoaded)
+            case "mcb"          => Compared.map(o => show(tableOfInfos(o.mismatchCols.map(_._2)))).getOrElse(notLoaded)
+            case "oa"           => Compared.map(o => show(tableOfInfos(o.onlyInDb1))).getOrElse(notLoaded)
+            case "ob"           => Compared.map(o => show(tableOfInfos(o.onlyInDb2))).getOrElse(notLoaded)
+            case "mkad"         => Compared.map(o => detail(o.mismatchKey.map(_._1), show, inst)).getOrElse(notLoaded)
+            case "mkbd"         => Compared.map(o => detail(o.mismatchKey.map(_._2), show, inst)).getOrElse(notLoaded)
+            case "mcad"         => Compared.map(o => detail(o.mismatchCols.map(_._1), show, inst)).getOrElse(notLoaded)
+            case "mcbd"         => Compared.map(o => detail(o.mismatchCols.map(_._2), show, inst)).getOrElse(notLoaded)
+            case "oad"          => Compared.map(o => detail(o.onlyInDb1, show, inst)).getOrElse(notLoaded)
+            case "obd"          => Compared.map(o => detail(o.onlyInDb2, show, inst)).getOrElse(notLoaded)
+            case "l" | "list"   => Compared.map(o => show(tableOfInfos(o.comparable))).getOrElse(notLoaded)
+            case "ln"| "lnokey" => Compared.map(o => show(tableOfInfos(o.filterNoKey))).getOrElse(notLoaded)
+            case "lk"| "lkey"   => Compared.map(o => show(tableOfInfos(o.filterKey))).getOrElse(notLoaded)
+            case "d" | "def"    => Compared.map(o => detail(o.comparable, show, inst)).getOrElse(notLoaded)
+            case "dn"| "dnokey" => Compared.map(o => detail(o.filterNoKey, show, inst)).getOrElse(notLoaded)
+            case "dk"| "dkey"   => Compared.map(o => detail(o.filterKey, show, inst)).getOrElse(notLoaded)
+            case "p" | "plan"   => Compared.map(o => showPlan(o, show, inst)).getOrElse(notLoaded)
+            case "ps"           => Compared.map(o => startPlan(o, show, inst, Some(10))).getOrElse(notLoaded)
+            case "ps100"        => Compared.map(o => startPlan(o, show, inst, Some(100))).getOrElse(notLoaded)
+            case "ps1k"         => Compared.map(o => startPlan(o, show, inst, Some(1000))).getOrElse(notLoaded)
+            case "ps2k"         => Compared.map(o => startPlan(o, show, inst, Some(2000))).getOrElse(notLoaded)
+            case "psa"          => Compared.map(o => startPlan(o, show, inst, None)).getOrElse(notLoaded)
+            case "psd"          => Compared.map(o => startPlan(o, show, inst, Some(5), compDebug = true)).getOrElse(notLoaded)
+            case "paa"          => Compared.map(o => startPlan(o, show, inst, None, applyTarget = true)).getOrElse(notLoaded)
+            case "pad"          => Compared.map(o => startPlan(o, show, inst, None, applyTarget = true,
+                                                           compDebug = true, applDebug = true)).getOrElse(notLoaded)
+            case "hash"         => Compared = Compared.map( _.updatePlan(true)); hashOn
+            case "nohash"       => Compared = Compared.map( _.updatePlan(false)); hashOff
             case "cd.."         => return Some("DBSync/")
-            case "in"| "init" =>
-              val out = initConf(show, inst)
-              out.toOption.flatMap(_.getOr).foreach(o => {
-                show(summary(o))
-                if(!o.crytoGrantedA)
-                  show("[NEED GRANT To handle LOB of source]".color(Color.Red).render + "GRANT EXECUTE ON SYS.DBMS_CRYPTO TO user-id;")
-                if(!o.crytoGrantedB)
-                  show("[NEED GRANT To handle LOB of target]".color(Color.Red).render + "GRANT EXECUTE ON SYS.DBMS_CRYPTO TO user-id;")
-                schemaCompared = Some(o)
-              })
-            case _ => show("[help] " +
-              "source target connect init load save brief list ln lk count(cn) def dn dk p ps".color(Color.Green).render)
+            case "in"| "init" => initConf(show, inst).toOption.flatMap(_.getOr).foreach(o => {
+                                        show(summary(o))
+                                        Compared = Some(o)
+                                      })
+            case _ => help
           }
           Some("DBSync/conf/")
         }
 
         def jobCommand(cmd: String, show: String => Unit, inst: RuntimeShellInstance) = {
-
           Some("DBSync/job/")
         }
 

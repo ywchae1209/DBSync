@@ -91,28 +91,39 @@ object CValComp {
       a.longBytes.compare(b.longBytes) == 0
     case (COraGeometry(_, x), COraGeometry(_, y))     => nestedEquals(x, y)
     case (CInterval(_, x), CInterval(_, y))           => x == y
-    case (CXML(_, x), CXML(_, y))                     => x == y
+    case (CXML(_, x), CXML(_, y))                     => xmlEquals(x, y)
     case _ => throw fault(s"isEqual: Not unsupported-type-columns")
   }
 
+
+
+  def xmlEquals(a: String, b: String): Boolean = {
+
+    def normalizeXml(s: String): String =
+      Option(s)
+        .map(_.replaceAll(">\\s+<", "><") // 태그 사이 공백 제거
+          .replaceAll("\\s+$", "")        // trailing newline 제거
+          .replaceAll("\r", "")           // CR 제거 (환경 차이)
+          .trim)
+        .orNull
+
+    val na = normalizeXml(a)
+    val nb = normalizeXml(b)
+    na == nb
+  }
+
+  // nested struct compare
   def nestedEquals(a: Any, b: Any) : Boolean = {
 
     val ret = (a, b) match {
       case (null, null) => true
       case (null, _) | (_, null) => false
 
-      case (s1: java.sql.Struct, s2: java.sql.Struct) =>
-        nestedEquals(s1.getAttributes, s2.getAttributes)
-
-      case (arr1: java.sql.Array, arr2: java.sql.Array) =>
-        nestedEquals(arr1.getArray, arr2.getArray)
-
-      case (a1: Array[_], a2: Array[_]) =>
-        a1.length == a2.length && a1.zip(a2).forall { case (x, y) => nestedEquals(x, y) }
-
+      case (s1: java.sql.Struct, s2: java.sql.Struct) => nestedEquals(s1.getAttributes, s2.getAttributes)
+      case (arr1: java.sql.Array, arr2: java.sql.Array) => nestedEquals(arr1.getArray, arr2.getArray)
+      case (a1: Array[_], a2: Array[_]) => a1.length == a2.length && a1.zip(a2).forall { case (x, y) => nestedEquals(x, y) }
       case (x, y) => x == y
     }
-    memo(s"nestedEquals: $ret : ${Option(a).map(_.toString)} ${Option(b).map(_.toString)}")
     ret
   }
 

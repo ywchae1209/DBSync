@@ -13,27 +13,37 @@ case class ComparePlan(
                         compRow: CompRow,
                         useLOBHash: Boolean = false
                       ) {
-  def goWith(s1: DataSource, s2: DataSource, count: Option[Int],
-             compDebug: Boolean = false,
+  def goWith(s1: DataSource, s2: DataSource,
+             count: Option[Int],
              applyTarget: Boolean,
+             exceptSame: Boolean = false,
+             compDebug: Boolean = false,
              applDebug: Boolean = false) = {
 
     val comp = new TableComparer(this, compDebug)
     val it = comp.compareIt(s1, s2)
-    val sized = if(count.isEmpty) it else it.take(count.get)
-    val logged = sized.map{ dr =>
-      println( dr)
-      if(compDebug) println( ">>> " + DiffRow.fromBytes(dr.serialize))
-      dr
-    }
-    if(applyTarget) {
-      val con = s2.getConnection
-      TableComparer.applyChanges(this, logged, if(applDebug) new Mockup.LoggingConnection else con)()
-      con.close()
-    } else
-      logged.size
+    try{
+      val sized = if(count.isEmpty) it else it.take(count.get)
+      val filtered = if(exceptSame) sized.filterNot(_.isInstanceOf[Same]) else sized
+      val logged = filtered.map{ dr =>
+        if(compDebug) {
+          println( "--- " + dr)
+          println( "+++ " + DiffRow.fromBytes(dr.serialize))
+        }
+        DiffRow.fromBytes(dr.serialize)
+      }
+      if(applyTarget) {
+        val con = s2.getConnection
+        TableComparer.applyChanges(this, logged, if(applDebug) new Mockup.LoggingConnection else con)()
+        con.close()
+      } else
+        logged.size
+      it.close()
 
-    it.close()
+    } catch { case e: Exception =>
+      println(e.toString)
+      it.close()
+    }
   }
 
   val keyComps: List[(CValComp, Int, Int)] = compRow.sortKey.map { k =>
@@ -186,31 +196,10 @@ object ComparePlan {
   /** LOB 컬럼 처리 */
   private def processLobColumn(c: ColInfo, ctx: BuildContext, useLOBHash: Boolean): Unit = {
     val lobIdx  = ctx.nextIndex()
+
     ctx.selectParts += c.name
     ctx.readers     += createCReader(c, lobIdx, "", c.jdbcType, isVirtual = false)
-
-    if (!useLOBHash) {
-      ctx.compLobPlans += CompLOB(c.name, lobIdx, lobIdx)
-    }
-    else
-    {
-      // todo :: currently not-used
-//      val hashIdx = ctx.nextIndex()
-//      if (ColInfo.blobTypes.contains(c.jdbcType)) {
-//        val hashSql = s"FN_BLOB_HASH(${c.name})"
-//        ctx.selectParts += s"$hashSql AS ${c.name}_HASH"
-//        ctx.readers += createCReader(c, hashIdx, "_HASH", java.sql.Types.VARCHAR, isVirtual = true)
-//
-//      }
-//      else if (ColInfo.clobTypes.contains(c.jdbcType)) {
-//        val hashSql = s"FN_CLOB_HASH(${c.name})"
-//        ctx.selectParts += s"$hashSql AS ${c.name}_HASH"
-//        ctx.readers += createCReader(c, hashIdx, "_HASH", java.sql.Types.VARCHAR, isVirtual = true)
-//      } else {
-//        throw new Exception(s"[processLobColumn] unknown lob-type : ${c.jdbcType}")
-//      }
-//      ctx.compColPlans += CompCol(s"${c.name}_HASH", hashIdx, hashIdx, None, isVirtual = true)
-    }
+    ctx.compLobPlans+= CompLOB(c.name, lobIdx, lobIdx)
 
   }
 

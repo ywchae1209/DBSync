@@ -10,17 +10,27 @@ object DBUtil {
     val config = new HikariConfig()
 
     config.setDriverClassName("oracle.jdbc.OracleDriver")
+
+    // java -jar DBSync_0.1.0.jar -Doracle.jdbc.RetainV9LongBindBehavior=true -Doracle.jdbc.convertNlobToString=false
+
+    // [LONG타입의 ORA-22835 우회 try] --> failed
+//    val connectionProperties = "oracle.jdbc.RetainV9LongBindBehavior=true&oracle.jdbc.convertNlobToString=false"
+//    val finalUrl = if (dbconf.url.contains("?")) s"${dbconf.url}&$connectionProperties" else s"${dbconf.url}?$connectionProperties"
+
     config.setJdbcUrl(dbconf.url)
     config.setUsername(dbconf.user)
     config.setPassword(dbconf.pass)
 
-    config.setMaximumPoolSize(5)           // 한 테이블당 1~2개 커넥션만 쓰므로 작게 잡아도 됨
+    config.setMaximumPoolSize(5)           // todo : modify
     config.setMinimumIdle(2)
     config.setConnectionTimeout(30000)     // 30초
     config.setIdleTimeout(600000)
 
     config.addDataSourceProperty("implicitCachingEnabled", "true")
     config.addDataSourceProperty("oracle.jdbc.defaultNChar", "true")
+
+    // [LONG타입의 ORA-22835 우회 try] --> failed
+//    config.addDataSourceProperty("oracle.jdbc.RetainV9LongBindBehavior", "true")
 
     new HikariDataSource(config)
   }

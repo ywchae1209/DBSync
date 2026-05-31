@@ -72,37 +72,11 @@ final case class COraGeometry(idx: Int, value: JGeometry) extends CVEquatable {
 }
 
 object COraGeometry {
-
   val wkbConvert = new WKB()
   val wktConvert = new WKT()
   def toBytes(geo: JGeometry): Array[Byte] = wkbConvert.fromJGeometry(geo)
   def fromBytes(bs: Array[Byte]): JGeometry = wkbConvert.toJGeometry(bs)
   def toWkt(geo:JGeometry) = new String(wktConvert.fromJGeometry(geo), "UTF-8")
-
-
-  def toWellKnownText(struct: java.sql.Struct): String = {
-    if (struct == null) return "NULL"
-    val attrs = struct.getAttributes
-
-    // attrs(2)는 SDO_POINT, attrs(4)는 SDO_ORDINATES 배열
-    // 1. 단순 POINT(X, Y, Z)인 경우 처리
-    if (attrs(2) != null) {
-      val pt = attrs(2).asInstanceOf[java.sql.Struct].getAttributes
-      s"POINT(${pt(0)} ${pt(1)})"
-    }
-    // 2. POLYGON, LINESTRING 등 복잡한 좌표 배열이 있는 경우
-    else if (attrs(4) != null) {
-      val gType = attrs(0).toString // 예: 2003 (Polygon)
-      val coords = attrs(4).asInstanceOf[java.sql.Array].getArray.asInstanceOf[Array[Object]]
-
-      // 좌표들을 X Y, X Y 형태로 2개씩 묶어서
-      val points = coords.grouped(2).map(p => s"${p(0)} ${p(1)}").mkString(", ")
-      if (gType.endsWith("03")) s"POLYGON(($points))"
-      else s"LINESTRING($points)"
-    } else {
-      "POINT(0 0)" // Fallback
-    }
-  }
 }
 
 final case class CInterval(idx: Int, value: String) extends CVEquatable

@@ -1,18 +1,26 @@
 package table
 
 import schema.ComparePlan
-import utils.LogHelper.memo
+import utils.LogHelper.{memo, oops}
 
+import java.io.StringReader
 import java.sql.{Connection, PreparedStatement, ResultSet, Types}
 import java.time.{Instant, ZoneId}
 import javax.sql.DataSource
+import tui.layoutzEx._
 
 class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
 
+  private def showCompareState(r1:Long, r2:Long, s:Long, u:Long, a:Long, b:Long, m: String, fin: Boolean) = {
+    if(fin)
+      println(s"match : $m ra:$r1 rb:$r2 sa:$s up:$u oa:$a ob:$b".color(Color.Yellow).render)
+    else
+      println(s"match : $m ra:$r1 rb:$r2 sa:$s up:$u oa:$a ob:$b")
+  }
+
   def compareIt(srcDs: DataSource, tgtDs: DataSource,
-                updateState: (Long, Long, Long, Long, Long, Long, String) => Unit
-               = {case (r1, r2, s, u, a, b, m) => println(s"$m r1:$r1 r2:$r2 same:$s update:$u onlyA:$a onlyB:$b") },
-                reportInterval: Int = 64
+                updateState: (Long, Long, Long, Long, Long, Long, String, Boolean) => Unit = showCompareState,
+                reportInterval: Int = 521
                ): Iterator[DiffRow] with AutoCloseable = {
 
     val srcConn = srcDs.getConnection
@@ -27,13 +35,18 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
     val startMillis: Long = System.currentTimeMillis()
     val startTime = Instant.ofEpochMilli(startMillis).atZone(ZoneId.systemDefault()).toLocalDateTime()
 
-    updateState(0,0,0,0,0,0,s"start : $startTime")
+    updateState(0,0,0,0,0,0,s"start $startTime", false)
     val srcRs = srcStmt.executeQuery()
     val tgtRs = tgtStmt.executeQuery()
 
-    val firstMillis: Long = System.currentTimeMillis()
-    val elapse = (firstMillis - startMillis)/ 1000.0
-    updateState(0,0,0,0,0,0,f"first : $elapse%.3f sec")
+    def elapseLog(start: Long = startMillis) = {
+      val now: Long = System.currentTimeMillis()
+      val elapse = (now - start)/ 1000.0
+      updateState(0,0,0,0,0,0,"["+ f"$elapse%.3f".color(Color.Red).render + s" sec] since $startTime", false)
+    }
+    elapseLog()
+
+    def debugLog(s: => String) = if(isDebug) println(s)
 
     new Iterator[DiffRow] with AutoCloseable {
 
@@ -54,24 +67,19 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
       private var curTgtRow: IndexedSeq[CVal] = if (tgtHasNext) readRowSequentially(tgtRs, sortedTgtReaders, "TARGET") else null
 
       // ------
-      @inline private def triggerStateUpdate(stateMessage: String = ""): Unit = {
-        val totalProcessed = sameCount + updCount + onlyACount + onlyBCount
-//        if (totalProcessed % reportInterval == 1) {
-//          updateState(readCount1, readCount2, sameCount, updCount, onlyACount, onlyBCount, stateMessage)
-//        }
+      @inline private def notify(stateMessage: String = "", fin: Boolean = false): Unit = {
+        val sum = readCount1 + readCount2
+        if (fin || (sum % reportInterval == 0)) {
+          updateState(readCount1, readCount2, sameCount, updCount, onlyACount, onlyBCount, stateMessage, fin)
+        }
       }
 
       private def readRowSequentially(rs: ResultSet, readers: List[CReader], label: String): IndexedSeq[CVal] = {
-        if (isDebug) {
-          println(s"\n============ [$label] Row Extraction Start ============")
-        }
-
+        debugLog(s"\n============ [$label] Row Extraction Start ============")
         val extracted = readers.map { r =>
           try {
             val cval = r.read(rs)
-            if (isDebug) {
-              println(f"  [Idx ${r.index}%2d] ${r.name}%-16s (${r.typeName}%-10s) => $cval")
-            }
+            debugLog(f"  [Idx ${r.index}%2d] ${r.name}%-16s (${r.typeName}%-10s) => $cval")
             cval
           } catch {
             case e: Exception =>
@@ -80,9 +88,9 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
               throw e
           }
         }.toIndexedSeq
-        if (isDebug) {
-          println(s"============ [$label] Row Extraction End ==============\n")
-        }
+        debugLog(s"============ [$label] Row Extraction End ==============\n")
+        if(readCount1 == 0L) elapseLog()
+
         extracted
       }
 
@@ -112,18 +120,18 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
               sameCount += 1
               nextBuffer = Some(Same(extractSourceKeys(curSrcRow)))
             }
-            triggerStateUpdate("compare")
+            notify("")
             advanceSource()
             advanceTarget()
           } else if (keyDiff < 0) {
             onlyACount += 1
             nextBuffer = Some(OnlyInA(extractSourceKeys(curSrcRow), extractSourceVals(curSrcRow)))
-            triggerStateUpdate("compare")
+            notify("compare")
             advanceSource()
           } else {
             onlyBCount += 1
             nextBuffer = Some(OnlyInB(extractTargetKeys(curTgtRow)))
-            triggerStateUpdate("compare")
+            notify("")
             advanceTarget()
           }
         }
@@ -132,12 +140,12 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
           if (srcHasNext) {
             onlyACount += 1
             nextBuffer = Some(OnlyInA(extractSourceKeys(curSrcRow), extractSourceVals(curSrcRow)))
-            triggerStateUpdate("remain")
+            notify("")
             advanceSource()
           } else if (tgtHasNext) {
             onlyBCount += 1
             nextBuffer = Some(OnlyInB(extractTargetKeys(curTgtRow)))
-            triggerStateUpdate("remain")
+            notify("")
             advanceTarget()
           }
         }
@@ -155,7 +163,7 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
 
       override def close(): Unit = {
 
-        triggerStateUpdate("fin")
+        notify("", true)
 
         Option(srcRs).foreach(_.close())
         Option(tgtRs).foreach(_.close())
@@ -191,7 +199,7 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
     while (colIt.hasNext) {
       val (comp, colA, colB) = colIt.next()
       if (!comp.equal(srcRow(colA - 1), tgtRow(colB - 1))) {
-        memo("diff(n): " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))
+        memo(s"diff(n): $colA -- $colB")
         return false
       }
     }
@@ -200,7 +208,7 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
     while (lobIt.hasNext) {
       val (comp, colA, colB) = lobIt.next()
       if (!comp.equal(srcRow(colA - 1), tgtRow(colB - 1))) {
-        memo("diff(l):" + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))
+        memo(s"diff(n): $colA -- $colB")
         return false
       }
     }
@@ -208,9 +216,7 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
   }
 
   private def extractSourceKeys(row: IndexedSeq[CVal]): List[CVal] = keyComps.map { case (_, colA, _) => row(colA - 1) }
-
   private def extractTargetKeys(row: IndexedSeq[CVal]): List[CVal] = keyComps.map { case (_, _, colB) => row(colB - 1) }
-
   private def extractSourceVals(row: IndexedSeq[CVal]): List[CVal]
   = colComps.map { case (_, colA, _) => row(colA - 1) } ++ lobComps.map { case (_, colA, _) => row(colA - 1) }
 
@@ -220,31 +226,49 @@ object TableComparer {
 
   def sqlForApply(plan: ComparePlan) = {
 
+    def typeName(name: String): String =
+      Option(name).map(_.toUpperCase match {
+        case n if n.endsWith("SDO_GEOMETRY") => "MDSYS.SDO_GEOMETRY"
+        case "LONG" => "LONG"
+        case "LONG RAW" => "LONG RAW"
+        case other => other
+      }).orNull
+
+
+    def typeCode(jdbcType: Int, name: String): Int = {
+
+      val upper = Option(typeName(name)).map(_.toUpperCase)
+
+      upper match {
+        case Some(n) if n.endsWith("SDO_GEOMETRY") => Types.STRUCT
+        case Some("LONG")     => Types.LONGVARCHAR
+        case Some("LONG RAW") => Types.LONGVARBINARY
+        case _                => jdbcType
+      }
+    }
+
     val tableName = plan.table.name
     val fullTableName = plan.table.schema.map(_ + ".").getOrElse("") + tableName
 
     val keyNames = plan.compRow.sortKey.map(_.name)
     val keyIndices= keyNames.map { name =>
-      val foundIdx = plan.sourceReaders.indexWhere(_.name == name)
-      if (foundIdx == -1) {
+      plan.sourceReaders.find(_.name == name).map(r => (r.name, typeCode(r.jdbcType, r.typeName), typeName(r.typeName))).getOrElse(
         throw new IllegalStateException(
           s"[Meta Mapping Error] PK Column '$name' defined in ComparePlan was not found in the source SELECT query (CReader list). " +
             s"Please check if the SELECT query contains this PK column."
         )
-      }
-      foundIdx
+      )
     }
     val valNames = plan.compRow.compCols.filterNot(_.isVirtual).map(_.name) ++ plan.compRow.compLobs.map(_.name)
     val valIndices= valNames.map { name =>
-      val foundIdx = plan.sourceReaders.indexWhere(_.name == name)
-      if (foundIdx == -1) {
+      plan.sourceReaders.find(_.name == name).map(r => (r.name, typeCode(r.jdbcType, r.typeName), typeName(r.typeName))).getOrElse(
         throw new IllegalStateException(
           s"[Meta Mapping Error] Physical Column '$name' defined in ComparePlan was not found in sourceReaders. " +
             s"Please check if the column name is misspelled or missing in sourceReaders."
         )
-      }
-      foundIdx
+      )
     }
+
 
     def toValuesPlaceholders(colNames: Seq[String]): String = { colNames.map(_ => "?").mkString(", ") }
     def toUpdatePlaceholders(colNames: Seq[String]): String = { colNames.map(name => s"$name = ?").mkString(", ") }
@@ -258,19 +282,16 @@ object TableComparer {
   }
 
 
-  import tui.layoutzEx._
-  def showUpdateState(ic: Long, uc: Long, dc: Long, sc: Long, fin: Boolean)
-  = println(s"insert $ic update $uc delete $dc skip $sc fin $fin".color(Color.Yellow).render)
+  def showApplyState(ic: Long, uc: Long, dc: Long, sc: Long, fin: Boolean)
+  = {
+    if(fin) println(s"apply :  in:$ic up:$uc de:$dc sa:$sc".color(Color.Yellow).render)
+    else    println(s"apply :  in:$ic up:$uc de:$dc sa:$sc")
+  }
 
-  /**
-   * 파일이나 스트림에서 읽어온 DiffRow 데이터를 Target DB에 Batch로 밀어 넣는 핵심 메서드
-   *
-   * @param targetConn Target DB 커넥션 (수동 커밋 제어 권장)
-   * @param diffs      비교 결과 스트림 (Iterator)
-   * @param batchSize  한 번에 커밋할 배치 크기
-   */
+
+  /** ------------------------------ */
   def applyChanges(plan: ComparePlan, diffs: Iterator[DiffRow], targetConn: Connection, batchSize: Int = 512)(
-    updateState: (Long, Long, Long, Long, Boolean) => Unit = showUpdateState): Unit = {
+    notify: (Long, Long, Long, Long, Boolean) => Unit = showApplyState): Unit = {
 
     val insStmt = targetConn.prepareStatement(plan.insertSql)
     val updStmt = targetConn.prepareStatement(plan.updateSql)
@@ -280,61 +301,79 @@ object TableComparer {
     var insCount, updCount, delCount, skiCount = 0L
 
     try {
+      val valIndices= plan.valIndices
+      val keyIndices= plan.keyIndices
+      val hasLongColumn = valIndices.exists(i => i._2 == java.sql.Types.LONGVARCHAR || i._2 == java.sql.Types.LONGNVARCHAR)
+
       diffs.foreach {
         // insert -----------
         case OnlyInA(keys, sourceVals) =>
-          bindRow(insStmt, keys ++ sourceVals, plan.keyIndices ++ plan.valIndices)
-          insStmt.addBatch()
-          insCount += 1
-          if (insCount % batchSize == 0) {
-            insStmt.executeBatch()
-            updateState(insCount, updCount, delCount, skiCount, false)
+          val ai = keyIndices ++ valIndices
+          bindRow(insStmt, keys ++ sourceVals, ai)
+          if(hasLongColumn) {
+            insStmt.executeUpdate()
+            insCount += 1
+            if (insCount % batchSize == 0) notify(insCount, updCount, delCount, skiCount, false)
+          } else {
+            insStmt.addBatch()
+            insCount += 1
+            if (insCount % batchSize == 0) {
+              insStmt.executeBatch()
+              notify(insCount, updCount, delCount, skiCount, false)
+            }
           }
 
         // update -----------
         case Update(keys, sourceVals) =>
-          val indices = plan.valIndices ++ plan.keyIndices
-          println(indices.mkString("Update Index: ", " ,", ""))
-          bindRow(updStmt, sourceVals ++ keys, indices)
-          updStmt.addBatch()
-          updCount += 1
-          if (updCount % batchSize == 0) {
-            updStmt.executeBatch()
-            updateState(insCount, updCount, delCount, skiCount, false)
+          val ui = valIndices ++ keyIndices
+          bindRow(updStmt, sourceVals ++ keys, ui)
+          if(hasLongColumn) {
+            updStmt.executeUpdate()
+            updCount += 1
+            if (updCount % batchSize == 0) notify(insCount, updCount, delCount, skiCount, false)
+          }
+          else {
+            updStmt.addBatch()
+            updCount += 1
+            if (updCount % batchSize == 0) {
+              updStmt.executeBatch()
+              notify(insCount, updCount, delCount, skiCount, false)
+            }
           }
 
         // delete -----------
         case OnlyInB(keys) =>
-          bindRow(delStmt, keys, plan.keyIndices)
+          val di = keyIndices
+          bindRow(delStmt, keys, di)
           delStmt.addBatch()
           delCount += 1
           if (delCount % batchSize == 0) {
             delStmt.executeBatch()
-            updateState(insCount, updCount, delCount, skiCount, false)
+            notify(insCount, updCount, delCount, skiCount, false)
           }
 
         case Same(_) =>
           skiCount += 1
           if (skiCount % batchSize == 0) {
-            updateState(insCount, updCount, delCount, skiCount, false)
+            notify(insCount, updCount, delCount, skiCount, false)
           }
       }
 
-      // 4. 잔여 배치 최종 릴리즈
-      if (insCount % batchSize != 0) insStmt.executeBatch()
-      if (updCount % batchSize != 0) updStmt.executeBatch()
+      // remains ------------------------
+      if(!hasLongColumn){
+        if (insCount % batchSize != 0) insStmt.executeBatch()
+        if (updCount % batchSize != 0) updStmt.executeBatch()
+      }
       if (delCount % batchSize != 0) delStmt.executeBatch()
 
       targetConn.commit()
-      updateState(insCount, updCount, delCount, skiCount, true)
-
-      println(s"[DR Apply Success] Inserted: $insCount, Updated: $updCount, Deleted: $delCount")
+      notify(insCount, updCount, delCount, skiCount, true)
 
     } catch {
       case e: Exception =>
+        notify(insCount, updCount, delCount, skiCount, true)
         targetConn.rollback()
-        println(s"[DR Apply Failed] Transaction rolled back. Reason: ${e.getMessage}")
-        throw e
+        oops("[DR Apply Failed]".color(Color.Red).render + s" last transaction rolled back. Reason: ${e.getMessage}")
     } finally {
       insStmt.close()
       updStmt.close()
@@ -342,60 +381,148 @@ object TableComparer {
     }
   }
 
-  private def bindRow(stmt: PreparedStatement, values: List[CVal], indices: List[Int]): Unit = {
-
-    // local mutate for performance
-    val vals = values.toIndexedSeq
+  private def bindRow( stmt: PreparedStatement,
+                       values: List[CVal],
+                       indices: List[(String, Int, String)],
+                       debug: Boolean = true ): Unit = {
 
     var paramIdx = 1
-    val it = indices.iterator
+    val it = values.iterator
+    val it0 = indices.iterator
 
-    while (it.hasNext) {
-      val idx = it.next()
-      val cval = vals(idx-1)
+    while (it.hasNext && it0.hasNext) {
+      val cval = it.next()
+      val (cname, ctype, tname) = it0.next()
+
+      def log(action: => String): Unit = {
+        if(debug) println(s"[BIND] idx=$paramIdx ($cname:$ctype:$tname) -> $action")
+      }
 
       cval match {
+
         case a: CVOrderable => a match {
-          case CInt(_, value) => stmt.setInt(paramIdx, value)
-          case CLong(_, value) => stmt.setLong(paramIdx, value)
-          case CBigInt(_, value) => stmt.setBigDecimal(paramIdx, new java.math.BigDecimal(value.bigInteger))
-          case CDouble(_, value) => stmt.setDouble(paramIdx, value)
-          case CDecimal(_, value) => stmt.setBigDecimal(paramIdx, value.bigDecimal)
-          case CString(_, value) => stmt.setString(paramIdx, value)
-          case CDate(_, value) => stmt.setDate(paramIdx, java.sql.Date.valueOf(value))
-          case CTime(_, value) => stmt.setTime(paramIdx, java.sql.Time.valueOf(value))
-          case CTimestamp(_, value) => stmt.setTimestamp(paramIdx, java.sql.Timestamp.valueOf(value))
+          case CInt(_, value) => log(s"setInt($value)")
+            stmt.setInt(paramIdx, value)
 
-          // todo :: check
-          case COffsetTime(_, value) => stmt.setObject(paramIdx, value)
-          case COffsetTimestamp(_, value) => stmt.setObject(paramIdx, value)
+          case CLong(_, value) => log(s"setLong($value)")
+            stmt.setLong(paramIdx, value)
+
+          case CBigInt(_, value) => log(s"setBigDecimal(${value.bigInteger})")
+            stmt.setBigDecimal(paramIdx, new java.math.BigDecimal(value.bigInteger))
+
+          case CDouble(_, value) => log(s"setDouble($value)")
+            stmt.setDouble(paramIdx, value)
+
+          case CDecimal(_, value) => log(s"setBigDecimal($value)")
+            stmt.setBigDecimal(paramIdx, value.bigDecimal)
+
+          case CString(_, value) => log(s"setString($value)")
+            stmt.setString(paramIdx, value)
+
+          case CDate(_, value) => log(s"setDate($value)")
+            stmt.setDate(paramIdx, java.sql.Date.valueOf(value))
+
+          case CTime(_, value) => log(s"setTime($value)")
+            stmt.setTime(paramIdx, java.sql.Time.valueOf(value))
+
+          case CTimestamp(_, value) => log(s"setTimestamp($value)")
+            stmt.setTimestamp(paramIdx, java.sql.Timestamp.valueOf(value))
+
+          case COffsetTime(_, value) => log(s"setObject(OffsetTime=$value)")
+            stmt.setObject(paramIdx, value)
+
+          case COffsetTimestamp(_, value) => log(s"setObject(OffsetTimestamp=$value)")
+            stmt.setObject(paramIdx, value)
         }
-        case a: CVEquatable => a match {
-          case CBoolean(_, value) => stmt.setBoolean(paramIdx, value)
-          case CBytes(_, value) => stmt.setBytes(paramIdx, value)
 
-          // todo :: check
-          case x: CLongString => stmt.setString(paramIdx, x.longString.makeString)
-          case x: CLongBytes => stmt.setBytes(paramIdx, x.longBytes.makeBytes)
+        case a: CVEquatable => a match {
+
+          case CBoolean(_, value) => log(s"setBoolean($value)")
+            stmt.setBoolean(paramIdx, value)
+
+          case CBytes(_, value) => log(s"setBytes(${value.length})")
+            stmt.setBytes(paramIdx, value)
+
+          case x: CLongString =>
+            val str = x.longString.makeString
+            if(ctype == Types.LONGVARCHAR || ctype == Types.LONGNVARCHAR ) {
+
+              val bytes = str.getBytes("UTF-8")
+              stmt.setObject(paramIdx, bytes, java.sql.Types.LONGVARCHAR)
+//              val is = new java.io.ByteArrayInputStream(bytes)
+//              log(s"setBinaryStream(len=${bytes.length})")
+//              stmt.setBinaryStream(paramIdx, is, bytes.length)
+////              val oracleStmt = stmt.unwrap(classOf[oracle.jdbc.OraclePreparedStatement])
+////              oracleStmt.setStringForClob(paramIdx, str)
+//              val reader = new java.io.StringReader(str)
+//              stmt.setCharacterStream(paramIdx, reader, str.length)
+            } else {
+              val reader = new StringReader(str)
+              log(s"setClob(len=${str.length})")
+              stmt.setClob(paramIdx, reader, str.length)
+            }
+
+          case x: CLongBytes =>
+            val bytes = x.longBytes.makeBytes
+            val is = new java.io.ByteArrayInputStream(bytes)
+            log(s"setBinaryStream(len=${bytes.length})")
+            stmt.setBinaryStream(paramIdx, is, bytes.length)
 
           case x: COraGeometry =>
-            val targetConn = stmt.getConnection
-            val oracleStruct: java.sql.Struct = oracle.spatial.geometry.JGeometry.store(x.value, targetConn)
-            stmt.setObject(paramIdx, oracleStruct)
+            val conn = stmt.getConnection
+            val struct =
+              if (x.value != null) {
+                log("toStruct + setObject(STRUCT)")
+                oracle.spatial.geometry.JGeometry.storeJS(x.value, conn)
+              } else {
+                log("null geometry → setObject(null, STRUCT)")
+                null
+              }
+            stmt.setObject(paramIdx, struct, java.sql.Types.STRUCT)
 
-          case CInterval(_, value) => stmt.setString(paramIdx, value) // 오라클 INTERVAL 규격 문자열
-          case CXML(_, value) => stmt.setString(paramIdx, value) // XML String
+          case CInterval(_, value) => log(s"setString(INTERVAL=$value)")
+            stmt.setString(paramIdx, value)
+
+          case CXML(_, value) =>
+            val conn = stmt.getConnection
+            val sqlxml = conn.createSQLXML()
+
+            sqlxml.setString(value)
+            log("setSQLXML")
+            stmt.setSQLXML(paramIdx, sqlxml)
         }
 
         case a: CVIncomparable => a match {
-          case CRowID(_, value) => stmt.setString(paramIdx, value) // 오라클 ROWID는 내부적으로 문자열
-          case CBFile(_, value) => stmt.setString(paramIdx, value) // BFile 주소 문자열
-          case CNull(_) => stmt.setNull(paramIdx, Types.NULL)
 
-          // this may not happen
-          case CNotSupport(_, jdbcType) => stmt.setNull(paramIdx, jdbcType)
+          case CRowID(_, value) => log(s"setString(ROWID=$value)")
+            stmt.setString(paramIdx, value)
+
+          case CBFile(_, value) => log(s"setString(BFILE=$value)")
+            stmt.setString(paramIdx, value)
+
+          case CNull(_) =>
+            ctype match {
+              case Types.OTHER =>
+                if(tname == "MDSYS.SDO_GEOMETRY") { // idiot oracle
+                  log("setNull(STRUCT, MDSYS.SDO_GEOMETRY)")
+                  stmt.setNull(paramIdx, Types.STRUCT, "MDSYS.SDO_GEOMETRY")
+                } else{
+                  log("setObject(null) [OTHER]")
+                  stmt.setObject(paramIdx, null)
+                }
+
+              case Types.STRUCT => log("setNull(STRUCT)")
+                stmt.setNull(paramIdx, Types.STRUCT)
+
+              case _ => log(s"setNull($ctype)")
+                stmt.setNull(paramIdx, ctype)
+            }
+
+          case CNotSupport(_, jdbcType) =>
+            throw new IllegalArgumentException(s"[bindRow: not support] idx=$paramIdx col=$cname jdbcType=$jdbcType")
         }
       }
+
       paramIdx += 1
     }
   }

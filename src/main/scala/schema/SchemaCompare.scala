@@ -52,13 +52,14 @@ object SchemaCompare {
    *  | MSSQL      | DB name        | Schema name (e.g., dbo)         )             |
   }}}
   */
-  def fetchSchema(ds: DataSource, schema:String): Map[String, TableInfo] = {
+  def fetchSchema(ds: DataSource, schema:String, callback: String => Unit): Map[String, TableInfo] = {
 
     val conn = ds.getConnection
     val meta: DatabaseMetaData = conn.getMetaData
     val tableNames = getTableNames(schema,meta) // todo :: oracle specific
 
     tableNames.map { tableName =>
+      callback( s"fetchSchema $tableName")
       tableName -> TableInfo(conn, schema, tableName)
     }.toMap
   }
@@ -103,7 +104,8 @@ object SchemaCompare {
   }
 
   def compareSchemas(schema1: Map[String, TableInfo],
-                     schema2: Map[String, TableInfo]): SchemaCompared = {
+                     schema2: Map[String, TableInfo],
+                     callback: String => Unit): SchemaCompared = {
 
     val names1 = schema1.keySet
     val names2 = schema2.keySet
@@ -115,6 +117,7 @@ object SchemaCompare {
     val columnMismatch = mutable.ListBuffer[(TableInfo, TableInfo)]()
 
     commonNames.foreach { name =>
+      callback(s"compare $name")
       val s1 = schema1(name)
       val s2 = schema2(name)
 
@@ -128,6 +131,7 @@ object SchemaCompare {
     }
 
     val comparable = identical.toList.sortBy(_.name)
+    callback("make compare plan")
     val comparePlans = comparable.map(c => ComparePlan.apply(c, false))
     SchemaCompared(
       comparable,
@@ -140,18 +144,18 @@ object SchemaCompare {
   }
 
 
-  def checkGrant(ds1: DataSource, ds2: DataSource, o: SchemaCompared): SchemaCompared = {
-    val conn1 = ds1.getConnection
-    val conn2 = ds1.getConnection
-    try{
-      val g1 = cryptoGranted(conn1)
-      val g2 = cryptoGranted(conn2)
-      o.copy( crytoGrantedA = g1, crytoGrantedB = g2)
-    } finally {
-      conn1.close()
-      conn2.close()
-    }
-  }
+//  def checkGrant(ds1: DataSource, ds2: DataSource, o: SchemaCompared): SchemaCompared = {
+//    val conn1 = ds1.getConnection
+//    val conn2 = ds1.getConnection
+//    try{
+//      val g1 = cryptoGranted(conn1)
+//      val g2 = cryptoGranted(conn2)
+//      o.copy( crytoGrantedA = g1, crytoGrantedB = g2)
+//    } finally {
+//      conn1.close()
+//      conn2.close()
+//    }
+//  }
 
 }
 

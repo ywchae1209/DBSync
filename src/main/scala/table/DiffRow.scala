@@ -16,7 +16,7 @@ final case class OnlyInB(keys: List[CVal] ) extends DiffRow {
 }
 
 final case class Update(keys: List[CVal], sourceVals: List[CVal] ) extends DiffRow {
-  override def toString: String = keys.mkString("U(@: [", ", ", "],") + sourceVals.mkString("A:[", ", ", "]")
+  override def toString: String = keys.mkString("U(@:[", ", ", "],") + sourceVals.mkString("A:[", ", ", "]")
 }
 
 final case class Same(keys: List[CVal] ) extends DiffRow {
@@ -32,7 +32,7 @@ import java.io.ByteArrayOutputStream
 
 object DiffRowSerDe {
 
-  // --- [1단계] 다형성 CVal 직렬화를 위한 타입별 고유 ID 상수 정의 ---
+  //
   private object TypeID {
     val INT = 1; val LONG = 2; val BIGINT = 3; val DOUBLE = 4; val DECIMAL = 5
     val STRING = 6; val DATE = 7; val TIME = 8; val TIMESTAMP = 9
@@ -41,7 +41,7 @@ object DiffRowSerDe {
     val LONG_BYTES = 18; val ROWID = 19; val BFILE = 20; val NULL = 21; val NOT_SUPPORT = 22
   }
 
-  // --- [2단계] 다형성 DiffRow 구분을 위한 고유 ID 상수 정의 ---
+  //
   private object DiffTypeID {
     val ONLY_IN_A = 101
     val ONLY_IN_B = 102
@@ -49,7 +49,7 @@ object DiffRowSerDe {
     val SAME      = 104
   }
 
-  //  SECTION 1. SERIALIZATION
+  //  SERIALIZATION
   // ==========================================
 
   def serialize(row: DiffRow): Array[Byte] = {
@@ -150,8 +150,7 @@ object DiffRowSerDe {
     }
   }
 
-  // ==========================================
-  //  SECTION 2. DESERIALIZATION (역직렬화)
+  //  DESERIALIZATION
   // ==========================================
   def deserialize(bytes: Array[Byte]): DiffRow = {
     val unpacker = MessagePack.newDefaultUnpacker(bytes)
@@ -274,7 +273,7 @@ object DiffRowSerDe {
       case TypeID.NOT_SUPPORT  => CNotSupport(idx, unpacker.unpackInt())
 
       case unknown =>
-        throw new IllegalStateException(s"MessagePack 스트림의 TypeID 깨짐 또는 변조 포착: $unknown")
+        throw new IllegalStateException(s"MessagePack corrupted TypeID, or value of jdbc.type = $unknown")
     }
   }
 }

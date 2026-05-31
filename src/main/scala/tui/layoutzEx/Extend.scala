@@ -283,22 +283,25 @@ object JPromptShell {
 // ================================================================================
 object InputPrompt {
 
-  def readNotEmpty(term: Terminal, ask: String, prompt: String, isSecret: Boolean)(implicit semaphore: ScreenSemaphore): String = {
+  def readNotEmpty(term: Terminal, ask: String, prompt: String, pre: Option[String], isSecret: Boolean)(implicit semaphore: ScreenSemaphore): String = {
     var out = ""
     do {
       if(ask != "")
         term.writeLine(ask)
-      out = readLine(term, prompt, isSecret)
+      out = readLine(term, prompt, pre, isSecret)
     } while(out == "")
 
     out
   }
 
-  def readLineSeq(term: Terminal, asks: Seq[((String, String), Boolean)])(implicit semaphore: ScreenSemaphore) = {
-    asks.map{ case ((ask, prompt), isSecret) => readNotEmpty(term, ask, prompt, isSecret)}
+  def readLineSeq(term: Terminal, asks: Seq[((String, String, Option[String]), Boolean)])(implicit semaphore: ScreenSemaphore) = {
+    asks.map{ case ((ask, prompt, pre), isSecret) => readNotEmpty(term, ask, prompt, pre, isSecret)}
   }
 
-  def readLine(term: Terminal, prompt: String, isSecret: Boolean = false)(implicit semaphore: ScreenSemaphore) = {
+  def readLine(term: Terminal,
+               prompt: String,
+               pre: Option[String] = None,
+               isSecret: Boolean = false)(implicit semaphore: ScreenSemaphore) = {
 
     val quitKey = Key.Ctrl('Q')
     val moveLeft ="\b"
@@ -308,7 +311,7 @@ object InputPrompt {
       @volatile var shouldContinue = true
       @volatile var done: Boolean = false
       @volatile var cursor: Int = 0
-      val buf = new StringBuilder()
+      val buf = new StringBuilder(pre.getOrElse(""))
 
       // 화면에 표시할 문자를 결정하는 헬퍼 함수
       def mask(s: String): String = if (isSecret) "*" * s.length else s
@@ -316,7 +319,6 @@ object InputPrompt {
 
       def redrawFromCursor(): Unit = {
         val remaining = buf.substring(cursor)
-        // 남은 글자들을 마스킹하여 출력
         term.write(mask(remaining) + " ")
         (0 to remaining.length).foreach(_ => term.write("\b"))
         term.flush()
@@ -324,6 +326,7 @@ object InputPrompt {
 
       semaphore.strictly{ () =>
         term.write(prompt0)
+        redrawFromCursor()
         term.flush
       }
 
