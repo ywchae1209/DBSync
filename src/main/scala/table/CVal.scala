@@ -31,7 +31,7 @@ sealed trait CVal {
       case CInterval(idx, value)     => s"($idx, $value)"
       case CXML(idx, value)          => s"($idx, $value)"
       case x@CLongString(idx, _, _)  => s"($idx, LString(${x.longString.makeString.take(512)}))"
-      case x@CLongBytes(idx, _, _)   => s"($idx, LBytes(${x.longBytes.makeBytes.take(52)}))"
+      case x@CLongBytes(idx, _, _)   => s"($idx, LBytes(${x.longBytes.makeBytes.length}))"
     }
     case a: CVIncomparable => a match {
       case CRowID(idx, value)       => s"($idx, RowId($value))"

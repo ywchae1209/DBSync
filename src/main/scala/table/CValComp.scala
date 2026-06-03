@@ -1,5 +1,6 @@
 package table
 
+import oracle.spatial.geometry.JGeometry
 import utils.LogHelper.{fault, memo}
 import zio.json.{DeriveJsonCodec, JsonCodec}
 
@@ -89,7 +90,7 @@ object CValComp {
       a.longString.compare(b.longString) == 0
     case (a:CLongBytes, b:CLongBytes)                 => // memo("comparing : LongBytes")
       a.longBytes.compare(b.longBytes) == 0
-    case (COraGeometry(_, x), COraGeometry(_, y))     => nestedEquals(x, y)
+    case (COraGeometry(_, x), COraGeometry(_, y))     => fastEquals(x, y)// nestedEquals(x, y)
     case (CInterval(_, x), CInterval(_, y))           => x == y
     case (CXML(_, x), CXML(_, y))                     => xmlEquals(x, y)
     case _ => throw fault(s"isEqual: Not unsupported-type-columns")
@@ -110,6 +111,70 @@ object CValComp {
     val na = normalizeXml(a)
     val nb = normalizeXml(b)
     na == nb
+  }
+  import oracle.spatial.geometry.JGeometry
+
+
+  // 기본 tolerance ---------------------------------
+  // 1e-15  double precision 한계
+  // 1e-12  JVM/ojdbc 흔한 오차
+  // 1e-9   generous 오차 (1000배 여유)
+  // 1e-6   GIS meter 수준 (≈ mm~cm)
+  val DEFAULT_ABS_TOL = 1e-9      // 절대 오차
+  val DEFAULT_REL_TOL = 1e-12     // 상대 오차
+
+  def fastEquals( a: JGeometry,
+                  b: JGeometry,
+                  absTol: Double = DEFAULT_ABS_TOL,
+                  relTol: Double = DEFAULT_REL_TOL ): Boolean = {
+
+    if (a eq b) return true
+    if (a == null || b == null) return false
+
+    if (a.getType != b.getType) return false
+    if (a.getSRID != b.getSRID) return false
+
+    val aElem = a.getElemInfo
+    val bElem = b.getElemInfo
+    if (!java.util.Arrays.equals(aElem, bElem)) return false
+
+    val aOrd = a.getOrdinatesArray
+    val bOrd = b.getOrdinatesArray
+
+    if (aOrd == null || bOrd == null) return aOrd == bOrd
+    if (aOrd.length != bOrd.length) return false
+
+    var i = 0
+    while (i < aOrd.length) {
+      val x = aOrd(i)
+      val y = bOrd(i)
+
+      if (x != y) {
+        val diff = Math.abs(x - y)
+        val tol = Math.max(absTol, relTol * Math.max(Math.abs(x), Math.abs(y)))
+        if (diff > tol) return false
+      }
+      i += 1
+    }
+    true
+  }
+
+  def fastExactEquals(a: JGeometry, b: JGeometry): Boolean = {
+    if (a eq b) return true
+    if (a == null || b == null) return false
+
+    if (a.getType != b.getType) return false
+    if (a.getSRID != b.getSRID) return false
+
+    val aElem = a.getElemInfo
+    val bElem = b.getElemInfo
+    if (!java.util.Arrays.equals(aElem, bElem)) return false
+
+    val aOrd = a.getOrdinatesArray
+    val bOrd = b.getOrdinatesArray
+    if (!java.util.Arrays.equals(aOrd, bOrd)) return false
+
+    true
   }
 
   // nested struct compare

@@ -1,25 +1,19 @@
 package table
 
+import oracle.jdbc.OracleConnection
 import schema.ComparePlan
+import tui.layoutzEx._
 import utils.LogHelper.{memo, oops}
 
 import java.io.StringReader
 import java.sql.{Connection, PreparedStatement, ResultSet, Types}
 import java.time.{Instant, ZoneId}
 import javax.sql.DataSource
-import tui.layoutzEx._
 
 class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
 
-  private def showCompareState(r1:Long, r2:Long, s:Long, u:Long, a:Long, b:Long, m: String, fin: Boolean) = {
-    if(fin)
-      println(s"match : $m ra:$r1 rb:$r2 sa:$s up:$u oa:$a ob:$b".color(Color.Yellow).render)
-    else
-      println(s"match : $m ra:$r1 rb:$r2 sa:$s up:$u oa:$a ob:$b")
-  }
-
   def compareIt(srcDs: DataSource, tgtDs: DataSource,
-                updateState: (Long, Long, Long, Long, Long, Long, String, Boolean) => Unit = showCompareState,
+                updateState: (Long, Long, Long, Long, Long, Long, String, Boolean) => Unit,
                 reportInterval: Int = 521
                ): Iterator[DiffRow] with AutoCloseable = {
 
@@ -35,7 +29,8 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
     val startMillis: Long = System.currentTimeMillis()
     val startTime = Instant.ofEpochMilli(startMillis).atZone(ZoneId.systemDefault()).toLocalDateTime()
 
-    updateState(0,0,0,0,0,0,s"start $startTime", false)
+    val startStr = s"start $startTime"
+    updateState(0,0,0,0,0,0,startStr, false)
     val srcRs = srcStmt.executeQuery()
     val tgtRs = tgtStmt.executeQuery()
 
@@ -46,7 +41,7 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
     }
     elapseLog()
 
-    def debugLog(s: => String) = if(isDebug) println(s)
+    def debugLog(s: => String) = if(isDebug) memo(s) // todo log-level
 
     new Iterator[DiffRow] with AutoCloseable {
 
@@ -67,10 +62,13 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
       private var curTgtRow: IndexedSeq[CVal] = if (tgtHasNext) readRowSequentially(tgtRs, sortedTgtReaders, "TARGET") else null
 
       // ------
-      @inline private def notify(stateMessage: String = "", fin: Boolean = false): Unit = {
+      @inline private def notice(msg: String = "", fin: Boolean = false): Unit = {
         val sum = readCount1 + readCount2
         if (fin || (sum % reportInterval == 0)) {
-          updateState(readCount1, readCount2, sameCount, updCount, onlyACount, onlyBCount, stateMessage, fin)
+          val millis = System.currentTimeMillis()
+          val now = Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDateTime
+          val str = startStr + ":@ " + now.toString + msg
+          updateState(readCount1, readCount2, sameCount, updCount, onlyACount, onlyBCount, str, fin)
         }
       }
 
@@ -89,7 +87,7 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
           }
         }.toIndexedSeq
         debugLog(s"============ [$label] Row Extraction End ==============\n")
-        if(readCount1 == 0L) elapseLog()
+        if((readCount1 + readCount2) == 0L) elapseLog()
 
         extracted
       }
@@ -107,6 +105,16 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
       }
 
       override def hasNext: Boolean = {
+        try{
+          hasNext0
+        } catch {case e: Throwable =>
+          println(s"--- compareIt : ${e.getMessage}")
+          e.printStackTrace()
+          throw e
+        }
+      }
+
+      def hasNext0: Boolean = {
         if (nextBuffer.isDefined) return true
 
         while (srcHasNext && tgtHasNext && nextBuffer.isEmpty) {
@@ -120,18 +128,18 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
               sameCount += 1
               nextBuffer = Some(Same(extractSourceKeys(curSrcRow)))
             }
-            notify("")
+            notice()
             advanceSource()
             advanceTarget()
           } else if (keyDiff < 0) {
             onlyACount += 1
             nextBuffer = Some(OnlyInA(extractSourceKeys(curSrcRow), extractSourceVals(curSrcRow)))
-            notify("compare")
+            notice()
             advanceSource()
           } else {
             onlyBCount += 1
             nextBuffer = Some(OnlyInB(extractTargetKeys(curTgtRow)))
-            notify("")
+            notice()
             advanceTarget()
           }
         }
@@ -140,12 +148,12 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
           if (srcHasNext) {
             onlyACount += 1
             nextBuffer = Some(OnlyInA(extractSourceKeys(curSrcRow), extractSourceVals(curSrcRow)))
-            notify("")
+            notice()
             advanceSource()
           } else if (tgtHasNext) {
             onlyBCount += 1
             nextBuffer = Some(OnlyInB(extractTargetKeys(curTgtRow)))
-            notify("")
+            notice()
             advanceTarget()
           }
         }
@@ -155,7 +163,10 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
       }
 
       override def next(): DiffRow = {
-        if (!hasNext) throw new NoSuchElementException("No more diff data.")
+        if (!hasNext) {
+          notice(msg = "No more diff data.")
+          throw new NoSuchElementException("No more diff data.")
+        }
         val res = nextBuffer.get
         nextBuffer = None
         res
@@ -163,7 +174,7 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
 
       override def close(): Unit = {
 
-        notify("", true)
+        notice(fin= true)
 
         Option(srcRs).foreach(_.close())
         Option(tgtRs).foreach(_.close())
@@ -199,7 +210,6 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
     while (colIt.hasNext) {
       val (comp, colA, colB) = colIt.next()
       if (!comp.equal(srcRow(colA - 1), tgtRow(colB - 1))) {
-        memo(s"diff(n): $colA -- $colB")
         return false
       }
     }
@@ -208,7 +218,6 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
     while (lobIt.hasNext) {
       val (comp, colA, colB) = lobIt.next()
       if (!comp.equal(srcRow(colA - 1), tgtRow(colB - 1))) {
-        memo(s"diff(n): $colA -- $colB")
         return false
       }
     }
@@ -290,8 +299,10 @@ object TableComparer {
 
 
   /** ------------------------------ */
-  def applyChanges(plan: ComparePlan, diffs: Iterator[DiffRow], targetConn: Connection, batchSize: Int = 512)(
-    notify: (Long, Long, Long, Long, Boolean) => Unit = showApplyState): Unit = {
+  def applyChanges(plan: ComparePlan, diffs: Iterator[DiffRow], targetConn: Connection,
+                   notice: (Long, Long, Long, Long, Boolean) => Unit,
+                   debug: Boolean,
+                   batchSize: Int = 512) = {
 
     val insStmt = targetConn.prepareStatement(plan.insertSql)
     val updStmt = targetConn.prepareStatement(plan.updateSql)
@@ -309,53 +320,53 @@ object TableComparer {
         // insert -----------
         case OnlyInA(keys, sourceVals) =>
           val ai = keyIndices ++ valIndices
-          bindRow(insStmt, keys ++ sourceVals, ai)
+          bindRow(insStmt, keys ++ sourceVals, ai, debug)
           if(hasLongColumn) {
             insStmt.executeUpdate()
             insCount += 1
-            if (insCount % batchSize == 0) notify(insCount, updCount, delCount, skiCount, false)
+            if (insCount % batchSize == 0) notice(insCount, updCount, delCount, skiCount, false)
           } else {
             insStmt.addBatch()
             insCount += 1
             if (insCount % batchSize == 0) {
               insStmt.executeBatch()
-              notify(insCount, updCount, delCount, skiCount, false)
+              notice(insCount, updCount, delCount, skiCount, false)
             }
           }
 
         // update -----------
         case Update(keys, sourceVals) =>
           val ui = valIndices ++ keyIndices
-          bindRow(updStmt, sourceVals ++ keys, ui)
+          bindRow(updStmt, sourceVals ++ keys, ui, debug)
           if(hasLongColumn) {
             updStmt.executeUpdate()
             updCount += 1
-            if (updCount % batchSize == 0) notify(insCount, updCount, delCount, skiCount, false)
+            if (updCount % batchSize == 0) notice(insCount, updCount, delCount, skiCount, false)
           }
           else {
             updStmt.addBatch()
             updCount += 1
             if (updCount % batchSize == 0) {
               updStmt.executeBatch()
-              notify(insCount, updCount, delCount, skiCount, false)
+              notice(insCount, updCount, delCount, skiCount, false)
             }
           }
 
         // delete -----------
         case OnlyInB(keys) =>
           val di = keyIndices
-          bindRow(delStmt, keys, di)
+          bindRow(delStmt, keys, di, debug)
           delStmt.addBatch()
           delCount += 1
           if (delCount % batchSize == 0) {
             delStmt.executeBatch()
-            notify(insCount, updCount, delCount, skiCount, false)
+            notice(insCount, updCount, delCount, skiCount, false)
           }
 
         case Same(_) =>
           skiCount += 1
           if (skiCount % batchSize == 0) {
-            notify(insCount, updCount, delCount, skiCount, false)
+            notice(insCount, updCount, delCount, skiCount, false)
           }
       }
 
@@ -367,11 +378,11 @@ object TableComparer {
       if (delCount % batchSize != 0) delStmt.executeBatch()
 
       targetConn.commit()
-      notify(insCount, updCount, delCount, skiCount, true)
+      notice(insCount, updCount, delCount, skiCount, true)
 
     } catch {
       case e: Exception =>
-        notify(insCount, updCount, delCount, skiCount, true)
+        notice(insCount, updCount, delCount, skiCount, true)
         targetConn.rollback()
         oops("[DR Apply Failed]".color(Color.Red).render + s" last transaction rolled back. Reason: ${e.getMessage}")
     } finally {
@@ -384,7 +395,7 @@ object TableComparer {
   private def bindRow( stmt: PreparedStatement,
                        values: List[CVal],
                        indices: List[(String, Int, String)],
-                       debug: Boolean = true ): Unit = {
+                       debug: Boolean): Unit = {
 
     var paramIdx = 1
     val it = values.iterator
@@ -394,9 +405,8 @@ object TableComparer {
       val cval = it.next()
       val (cname, ctype, tname) = it0.next()
 
-      def log(action: => String): Unit = {
-        if(debug) println(s"[BIND] idx=$paramIdx ($cname:$ctype:$tname) -> $action")
-      }
+      def log(action: => String): Unit
+      = { if(debug) memo(s"[BIND] idx=$paramIdx ($cname:$ctype:$tname) -> $action") }
 
       cval match {
 
@@ -446,16 +456,9 @@ object TableComparer {
           case x: CLongString =>
             val str = x.longString.makeString
             if(ctype == Types.LONGVARCHAR || ctype == Types.LONGNVARCHAR ) {
-
-              val bytes = str.getBytes("UTF-8")
-              stmt.setObject(paramIdx, bytes, java.sql.Types.LONGVARCHAR)
-//              val is = new java.io.ByteArrayInputStream(bytes)
-//              log(s"setBinaryStream(len=${bytes.length})")
-//              stmt.setBinaryStream(paramIdx, is, bytes.length)
-////              val oracleStmt = stmt.unwrap(classOf[oracle.jdbc.OraclePreparedStatement])
-////              oracleStmt.setStringForClob(paramIdx, str)
-//              val reader = new java.io.StringReader(str)
-//              stmt.setCharacterStream(paramIdx, reader, str.length)
+              val reader = new java.io.StringReader(str)
+              log(s"setCharacterStream(len=${str.length})")
+              stmt.setCharacterStream(paramIdx, reader, str.length)
             } else {
               val reader = new StringReader(str)
               log(s"setClob(len=${str.length})")
@@ -470,26 +473,24 @@ object TableComparer {
 
           case x: COraGeometry =>
             val conn = stmt.getConnection
+            val ora = conn.unwrap(classOf[OracleConnection])
             val struct =
               if (x.value != null) {
                 log("toStruct + setObject(STRUCT)")
-                oracle.spatial.geometry.JGeometry.storeJS(x.value, conn)
+                oracle.spatial.geometry.JGeometry.storeJS(x.value, ora)
               } else {
                 log("null geometry → setObject(null, STRUCT)")
                 null
               }
             stmt.setObject(paramIdx, struct, java.sql.Types.STRUCT)
 
-          case CInterval(_, value) => log(s"setString(INTERVAL=$value)")
+          case CInterval(_, value) =>
+            log(s"setString(INTERVAL=$value)")
             stmt.setString(paramIdx, value)
 
           case CXML(_, value) =>
-            val conn = stmt.getConnection
-            val sqlxml = conn.createSQLXML()
-
-            sqlxml.setString(value)
-            log("setSQLXML")
-            stmt.setSQLXML(paramIdx, sqlxml)
+            log(s"setString(XMLString=$value)")
+            stmt.setString(paramIdx, value)
         }
 
         case a: CVIncomparable => a match {
@@ -522,7 +523,6 @@ object TableComparer {
             throw new IllegalArgumentException(s"[bindRow: not support] idx=$paramIdx col=$cname jdbcType=$jdbcType")
         }
       }
-
       paramIdx += 1
     }
   }

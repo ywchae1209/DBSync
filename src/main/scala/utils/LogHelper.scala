@@ -1,5 +1,9 @@
 package utils
 
+import java.nio.file.{Files, Paths}
+import scala.jdk.CollectionConverters.IteratorHasAsScala
+import scala.util.Try
+
 object LogHelper {
   // logging
   // ================================================================================
@@ -58,6 +62,31 @@ object LogHelper {
   @inline def toHex(b: Array[Byte]): String = b.map("%02X".format(_)).mkString
   @inline def bytesToBase64(b: Array[Byte]): String = java.util.Base64.getEncoder.encodeToString(b)
   @inline def base64ToBytes(s: String): Array[Byte] = java.util.Base64.getDecoder.decode(s)
+
+  def extractBetween(s: String, prefix: String, suffix: String): Option[String] = {
+    val start = s.indexOf(prefix)
+    if (start == -1) return None
+
+    val from = start + prefix.length
+    val end = s.indexOf(suffix, from)
+    if (end == -1) return None
+
+    Some(s.substring(from, end))
+  }
+
+  def getFileList(prefix: String, suffix: String, dir: String = "."): Either[Throwable, List[String]]
+  = {
+    Try {
+      val path = Paths.get(dir)
+      Files.list(path)
+        .iterator()
+        .asScala
+        .filter(Files.isRegularFile(_))                // 파일만
+        .map(_.getFileName.toString)
+        .filter(name => name.startsWith(prefix) && name.endsWith(suffix))
+        .toList
+    }.toEither
+  }
 
   // lift exception
   // ================================================================================

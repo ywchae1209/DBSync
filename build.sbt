@@ -1,6 +1,6 @@
 import scala.collection.Seq
 
-ThisBuild / version := "0.5.0"
+ThisBuild / version := "0.8.0"
 
 ThisBuild / scalaVersion := "2.13.18"
 
@@ -72,6 +72,7 @@ libraryDependencies += "org.slf4j" % "slf4j-nop" % "2.0.12"
 
 // zio json
 libraryDependencies += "dev.zio" %% "zio-json" % "0.9.2"
+libraryDependencies += "dev.zio" %% "zio" % "2.1.26"
 
 // messagePack
 libraryDependencies += "org.msgpack" % "msgpack-core" % "0.9.12"

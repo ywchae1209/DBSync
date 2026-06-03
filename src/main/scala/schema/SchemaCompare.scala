@@ -16,21 +16,10 @@ case class SchemaCompared(comparable: List[TableInfo],              // both have
                           onlyInDb1: List[TableInfo],
                           onlyInDb2: List[TableInfo],
                           comparePlans: List[ComparePlan],
-                          crytoGrantedA: Boolean = false,
-                          crytoGrantedB: Boolean = false,
                          ) {
-  def get(tableName: String): Option[TableInfo]
-  = comparable.find( _.name == tableName)
-
+  def get(tableName: String): Option[TableInfo] = comparable.find( _.name == tableName)
   def filterNoKey = comparable.filter(i => i.primaryKey.isEmpty && i.uniqueKeys.isEmpty)
   def filterKey = comparable.filter(i => i.primaryKey.isDefined || i.uniqueKeys.nonEmpty)
-  def filterUk = comparable.filter(i => i.uniqueKeys.nonEmpty)
-
-  def updatePlan(useLOBHash: Boolean): SchemaCompared = {
-    println("LOB hash not supported.")
- //   this.copy( comparePlans = comparable.map( c => ComparePlan.apply(c, useLOBHash)))
-    this
-  }
 }
 
 object SchemaCompare {
@@ -54,41 +43,19 @@ object SchemaCompare {
   */
   def fetchSchema(ds: DataSource, schema:String, callback: String => Unit): Map[String, TableInfo] = {
 
+    // todo :: exception
     val conn = ds.getConnection
     val meta: DatabaseMetaData = conn.getMetaData
     val tableNames = getTableNames(schema,meta) // todo :: oracle specific
 
-    tableNames.map { tableName =>
-      callback( s"fetchSchema $tableName")
+    val out = tableNames.map { tableName =>
+      callback( tableName)
       tableName -> TableInfo(conn, schema, tableName)
     }.toMap
+
+    conn.close()
+    out
   }
-
-  def cryptoGranted(conn: Connection) = {
-
-    // 오라클 시스템 권한 뷰(ALL_TAB_PRIVS)를 조회하는 쿼리
-    // TABLE_NAME은 패키지명이며, PRIVILEGE는 'EXECUTE' 상태인지를 검사합니다.
-    val sql =
-      """
-        |SELECT COUNT(*)
-        |FROM ALL_TAB_PRIVS
-        |WHERE TABLE_NAME = 'DBMS_CRYPTO'
-        |  AND PRIVILEGE = 'EXECUTE'
-      """.stripMargin
-
-    val result = Using(conn.prepareStatement(sql)) { stmt =>
-      Using(stmt.executeQuery()) { rs =>
-        if (rs.next()) {
-          rs.getInt(1) > 0
-        } else {
-          false
-        }
-      }.getOrElse(false)
-    }
-    val granted = result.getOrElse(false)
-    granted
-  }
-
 
   def showEncoding(conn: Connection) = {
     val stmt = conn.createStatement()
@@ -117,7 +84,7 @@ object SchemaCompare {
     val columnMismatch = mutable.ListBuffer[(TableInfo, TableInfo)]()
 
     commonNames.foreach { name =>
-      callback(s"compare $name")
+      callback(name)
       val s1 = schema1(name)
       val s2 = schema2(name)
 
@@ -142,21 +109,6 @@ object SchemaCompare {
       comparePlans
     )
   }
-
-
-//  def checkGrant(ds1: DataSource, ds2: DataSource, o: SchemaCompared): SchemaCompared = {
-//    val conn1 = ds1.getConnection
-//    val conn2 = ds1.getConnection
-//    try{
-//      val g1 = cryptoGranted(conn1)
-//      val g2 = cryptoGranted(conn2)
-//      o.copy( crytoGrantedA = g1, crytoGrantedB = g2)
-//    } finally {
-//      conn1.close()
-//      conn2.close()
-//    }
-//  }
-
 }
 
 //////////////////////////////////////////////////////////////////////////////////
@@ -226,7 +178,7 @@ object SchemaCompared {
 
     Seq(
       textYellow(t.name, lob),
-      t.primaryKey.map(_.toString.color(Color.BrightMagenta))
+      t.primaryKey.map(_.toString.color(Color.Green))
         .getOrElse(
           t.uniqueKeys
             .headOption.map(_.toString.color(Color.Green))
@@ -238,19 +190,33 @@ object SchemaCompared {
     )
   }
 
-  def headerAndRows(l: List[TableInfo]) = {
+  def headerAndRows(l: Seq[TableInfo]) = {
     val rows: Seq[Seq[Element]] = l.map(t => rowElements(t) )
     val hdr = Seq("Table", "Key","Col#", "#Source", "$Target")
 
     hdr -> rows
   }
 
-  def tableOfInfos(l: List[TableInfo]): String = {
+  def tableOfInfos(l: Seq[TableInfo]): String = {
     if(l.isEmpty) return "empty"
 
     val (hdr, rows) = headerAndRows(l)
     val str = table( hdr, rows )
     str.render
+  }
+
+  def selectTables(l: Seq[TableInfo])(implicit term: Terminal, screenSemaphore: ScreenSemaphore): Seq[TableInfo] = {
+    if(l.isEmpty)
+      return List.empty
+
+    val (hdr, rows) = headerAndRows(l)
+    val ss = MultiTable
+      .multiTable("select tables",  hdr, rows)
+      .run( clearOnStart=false, clearOnExit= false, terminal= Some(term))
+      .map(_.selected).getOrElse(Set.empty)
+
+    val tables = l.zipWithIndex.flatMap{ case (a, i) => if(ss.contains(i)) Some(a) else None }
+    tables
   }
 
 }

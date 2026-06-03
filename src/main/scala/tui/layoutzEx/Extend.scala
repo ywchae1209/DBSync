@@ -4,6 +4,7 @@ import org.jline.utils.AttributedString
 
 import scala.collection.JavaConverters.seqAsJavaListConverter
 import scala.collection.concurrent.TrieMap
+import scala.util.Try
 
 trait withViewAll{
   def viewAll: Element
@@ -31,7 +32,9 @@ object JPromptShell {
   case object Done extends Fin
   case object Stop extends Fin
 
-  case class TaskInfo( id: Int, name: String, taskStatus: TaskStatus = Wait, element: Element ) {
+  case class TaskInfo( id: Int, name: String,
+                       taskStatus: TaskStatus = Wait,
+                       element: Element = "") {
 
     @volatile var tick : Int = 0
 
@@ -48,112 +51,32 @@ object JPromptShell {
     }
   }
 
-  case class Tasks(name: String) {
-
-    private val maps: TrieMap[Int, TaskInfo] = TrieMap.empty
-
-    @volatile private var showFilter: Option[TaskStatus] = None
-    @volatile private var showCount: Int = 8
-    private val filterLock = new Object()
-    private val countLock = new Object()
-
-    def setShowMode(mode: Option[TaskStatus]): Unit = filterLock.synchronized { showFilter = mode }
-
-    def getShowMode(): Option[TaskStatus] = filterLock.synchronized { showFilter }
-
-    def setHeight(count: Int): Unit = countLock.synchronized { showCount = if( count < 1) 8 else count }
-
-    def getHeight(): Int = countLock.synchronized { showCount }
-
-    def setStatus(idx: Int, st: TaskStatus) = {
-      maps.updateWith(idx)( _.map( _.copy( taskStatus = st)) )
-    }
-
-    def updateTask(idx: Int, info: TaskInfo) = {
-      maps.updateWith(idx)( _.map( _ => info) )
-    }
-
-    def updateTaskWith(idx: Int)(f: Option[TaskInfo] => Option[TaskInfo]) = {
-      maps.updateWith(idx)(f)
-    }
-
-    def putIfAbsent(idx: Int, info: TaskInfo) = {
-      maps.putIfAbsent(idx, info)
-    }
-
-    def getStatusMsg(): List[AttributedString] = {
-
-      val current = maps.snapshot()
-      val n = getHeight()
-      val gs = current.values.toList.groupBy(_.taskStatus)
-
-      val st = gs.view.mapValues(_.size)
-        .map( g => f"${g._1}%4s: ${g._2}%-3d")
-        .mkString(" ")
-        .style(Style.Reverse ++ Style.Bold)
-        .render
-
-      val summary = s" [ $name ]".color(Color.Green).style(Style.Reverse ++ Style.Bold).render + st
-
-      val as = getShowMode() match {
-        case Some(m) =>
-          gs(m)
-            .filter(_.taskStatus == m)
-            .sortBy(_.id)
-            .take(n)
-            .map(_.render)
-
-        case None =>
-          current.values
-            .filterNot(i => i.taskStatus == Done || i.taskStatus == Stop)
-            .toList
-            .sortBy(_.id)
-            .take(n)
-            .map(_.render)
-      }
-      val filled = (as ++ List.fill(n - as.length - 1)(""))
-
-      AttributedString.fromAnsi(summary) +: filled
-        .map(AttributedString.fromAnsi)
-    }
-
-    def isNotFinished(): Boolean = {
-      maps.exists{ case (k, v) => v.taskStatus == Wait || v.taskStatus == Run }
-    }
+  trait TUIBarStates {
+    def getStatusMsg(): List[AttributedString]
   }
 
   trait RuntimeShellInstance {
 
+    // --------------------------------------------------------------------------------
     @volatile var showStatus: Boolean = false
     private val lockS = new Object()
+    var barHeight: Int = 5
 
-    @volatile var tasks: Option[Tasks] = None
+    @volatile var barStates: Option[TUIBarStates] = None
     private val lockT = new Object()
 
     def showStatusBar() = lockS.synchronized { showStatus = true}
     def hideStatusBar() = lockS.synchronized { showStatus = false}
     def needShowStatusBar() = lockS.synchronized { showStatus }
-    def setStatusHeight(h: Int): Boolean = lockT.synchronized{ tasks.map( _.setHeight(h)).isDefined}
 
-    def setTasks(name: String, ts: Tasks): Boolean = {
-      //      if( ts.isNotFinished() ) false else
-      {
-        lockT.synchronized{ tasks = Some(ts) }
-        true
-      }
-    }
-    def updateTaskWith( f: Option[Tasks] => Unit) = {
-      lockT.synchronized{
-        f(tasks)
-      }
-    }
+    def setStatusHeight(h: Int) = { barHeight = h }
 
-    def getTasksMsg() = tasks.map( _.getStatusMsg()).getOrElse(List.empty)
+    def setBatStates(st: Option[TUIBarStates])= lockT.synchronized { barStates = st }
+    def getBarStatesMsg = barStates.map( _.getStatusMsg()).getOrElse(List.empty)
 
-    ////////////////////////////////////////////////////////////////////////////////
+    // --------------------------------------------------------------------------------
+
     val term : Terminal
-
-    ////////////////////////////////////////////////////////////////////////////////
     def setPrompt(s: String): Unit
     def runShell(): Unit
   }
@@ -214,7 +137,6 @@ object JPromptShell {
       }
 
       def show(s: String): Unit = {
-
         semaphore.strictly{ () =>
           jTermWrapper.writeLine(s)
           jTermWrapper.flush()
@@ -222,42 +144,41 @@ object JPromptShell {
       }
 
       private def runIOLoop(self: RuntimeShellInstance) = {
-
         while(shouldContinue) {
-          try{
-            val prompt = getPrompt
-            val line = InputPrompt.readLine(jTermWrapper, prompt.color(Color.Yellow).render)
-            shellApp.handleIO(prompt, show, line, self).foreach{s =>
-//              show(getPrompt)
-              setPrompt(s)
-            }
+          val p0 = getPrompt
+          val p1 = for {
+            l <- Try(InputPrompt.readLine(jTermWrapper, p0.color(Color.Yellow).render))
+            p <- Try(shellApp.handleIO(p0, show, l, self))
+          } yield p
 
+          if(p1.isFailure) {
+            shouldContinue = false
+          } else {
+            p1.foreach( _.foreach (setPrompt))
             if(shellApp.stopIOLoop())
               shouldContinue = false
-
-            Thread.sleep(50)
           }
-          catch { case e: Throwable =>
-            show(e.toString)
-            shouldContinue = false
-          }
+          Thread.sleep(50)
         }
       }
 
+      // todo ::
       def renderStateBar(): Boolean = {
         try{
           if( needShowStatusBar()) {
-            num = (num + 1) % Int.MaxValue
-            val temp = AttributedString.fromAnsi( " " + spinner(frame = num.toInt, style = SpinnerStyle.Moon).render )
-            val ls = temp +: getTasksMsg()
-            semaphore.loosely { () =>
-              jStateBar.setBorder(true)
-              jStateBar.update( ls.asJava)
+//            num = (num + 1) % Int.MaxValue
+//            val temp = AttributedString.fromAnsi( " " + spinner(frame = num.toInt, style = SpinnerStyle.Moon).render )
+//            val ls = temp +: getBarStatesMsg
+            val ls = getBarStatesMsg
+            if(ls.isEmpty) jStateBar.hide() else {
+              semaphore.loosely { () =>
+                jStateBar.setBorder(true)
+                jStateBar.update( ls.asJava)
+              }
             }
           } else {
             jStateBar.hide()
           }
-
           true
         }
         catch { case e: Throwable =>
@@ -283,6 +204,12 @@ object JPromptShell {
 // ================================================================================
 object InputPrompt {
 
+  def askConfirm(term: Terminal, msg: String = "")(implicit semaphore: ScreenSemaphore): Boolean
+  = {
+    val confirm = readNotEmpty(term, "", msg + " is ok (yes/no) ? ".color(Color.Yellow).render, None, false)
+    confirm.toLowerCase.startsWith("y")
+  }
+
   def readNotEmpty(term: Terminal, ask: String, prompt: String, pre: Option[String], isSecret: Boolean)(implicit semaphore: ScreenSemaphore): String = {
     var out = ""
     do {
@@ -301,7 +228,7 @@ object InputPrompt {
   def readLine(term: Terminal,
                prompt: String,
                pre: Option[String] = None,
-               isSecret: Boolean = false)(implicit semaphore: ScreenSemaphore) = {
+               isSecret: Boolean = false)(implicit semaphore: ScreenSemaphore): String = {
 
     val quitKey = Key.Ctrl('Q')
     val moveLeft ="\b"
@@ -491,11 +418,11 @@ object JobSpinner {
       def progressBar(tick: Int) = {
         val width = 50
         val filled = if(done.isDefined) 50 else (tick / 2)
-        val bar: Seq[Element] = (0 until width).map { i =>
-          if (i < filled) {
+        val bar = (0 until width).map { i =>
+          if (i >= filled) { "░".color(Color.BrightBlack) } else {
             val ratio = i.toDouble / width
-            "█".color(Color.True( (ratio * 180).toInt + 50, ((1 - ratio) * 200).toInt + 55, 255 ))
-          } else "░".color(Color.BrightBlack)
+            "█".color(Color.True((ratio * 180).toInt + 50, ((1 - ratio) * 200).toInt + 55, 255))
+          }
         }
         rowTight(bar: _*)
       }
@@ -538,7 +465,7 @@ object SingleBox {
                 options: Seq[String],
                 selection: Int = 0,
                 pageRow: Int = 20,
-                active: Boolean = false)
+                active: Boolean = true)
   = new LayoutzApp[SBState, SBMsg] with withViewAll {
 
     val totalRow = options.size

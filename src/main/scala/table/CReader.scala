@@ -112,7 +112,7 @@ object CReader {
 
     OracleTypes.TIMESTAMP       -> getAsTimestamp,
     OracleTypes.TIMESTAMPTZ     -> getAsOffsetDateTime,
-    OracleTypes.TIMESTAMPLTZ    -> getAsOffsetDateTime,
+    OracleTypes.TIMESTAMPLTZ    -> getAsTimestamp, //getAsOffsetDateTime,
 
     // Equatable
     OracleTypes.BOOLEAN         -> getAsBoolean,
@@ -221,11 +221,11 @@ object CReader {
   }
 
   def getAsOraGeometry(cs: CReader): ResultSet => CVal = rs => {
-    val obj = rs.getObject(cs.index)
-    if (obj == null) CNull(cs.index) else {
-      val s = obj.asInstanceOf[java.sql.Struct]
-      val j = oracle.spatial.geometry.JGeometry.loadJS(s)
-      COraGeometry(cs.index, j)
+
+    val bytes = rs.getBytes(cs.index)
+    if (bytes == null) CNull(cs.index) else {
+      val geom = oracle.spatial.geometry.JGeometry.load(bytes)
+      COraGeometry(cs.index, geom)
     }
   }
   def getAsDouble(cs: CReader): ResultSet => CVal = rs => {

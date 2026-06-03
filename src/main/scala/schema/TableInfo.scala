@@ -39,7 +39,7 @@ case class TableInfo(name: String,
   def fetchCount(ds1: DataSource, ds2: DataSource): TableInfo = {
     val countA = TableInfo.fetchCount(ds1, this)
     val countB = TableInfo.fetchCount(ds2, this)
-    copy(countA= Some(countA), countB = Some(countB))
+    copy(countA= countA, countB = countB)
   }
 }
 
@@ -108,8 +108,10 @@ object TableInfo {
     try {
       val rs = stmt.executeQuery(sql)
       val count = if (rs.next()) rs.getLong(1) else 0L
-//      println(sql + "\t" + count)
-      count
+      Some(count)
+    }
+    catch { case e: Throwable =>
+      None
     } finally {
       stmt.close()
       conn.close()
