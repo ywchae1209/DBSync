@@ -27,10 +27,56 @@ import oracle.spatial.util.WKB
 import org.msgpack.core.{MessagePack, MessagePacker, MessageUnpacker}
 import table.LongCollection.LongBytes.fromBytes
 import table.LongCollection.LongString.fromString
+import tui.{ReportMsg, Stopped}
 
 import java.io.ByteArrayOutputStream
 
 object DiffRowSerDe {
+
+  import java.io.FileOutputStream
+  import java.io.FileInputStream
+  import scala.util.Using
+
+  def readDiffRows(name: String, path: String,
+                   cancel: () => Boolean, callback: ReportMsg => Unit)
+  : Either[Throwable, Iterator[DiffRow]] = {
+    Using(new FileInputStream(path)) { fis =>
+      val unpacker: MessageUnpacker = MessagePack.newDefaultUnpacker(fis)
+
+      Iterator.continually {
+        if(cancel()) {
+          callback( ReportMsg(name, "[Read Stopped] $path by user", Stopped))
+          None
+        } else if (unpacker.hasNext) Some(unpackDiffRow(unpacker))
+        else None
+      }.takeWhile(_.isDefined).map(_.get)
+    }.toEither
+  }
+
+  def writeDiffRows(name: String ,path: String, rows: Iterator[DiffRow],
+                    cancel: () => Boolean, callback: ReportMsg => Unit)
+  : Either[Throwable, Long] = {
+    Using(new FileOutputStream(path)) { fos =>
+      val packer: MessagePacker = MessagePack.newDefaultPacker(fos)
+      try {
+        var total = 0L
+        rows.foreach { row =>
+          if(cancel()) {
+            packer.flush()
+            callback( ReportMsg(name, s"[Write Stopped] $path (written: $total) by user", Stopped) )
+            return Right(total)
+          }
+          total = total + 1
+          packDiffRow(row, packer)
+          if(total % 512 == 0) packer.flush()
+        }
+        packer.flush()
+        total
+      } finally {
+        packer.close()
+      }
+    }.toEither
+  }
 
   //
   private object TypeID {

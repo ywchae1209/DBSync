@@ -2,7 +2,8 @@ package schema
 
 import schema.ComparePlan.{CancelledException, cancelleableIt}
 import table._
-import tui.SyncTUI.{Finished, HasName, InProgress, ReportMsg, TUITask, TaskStatus}
+import tui.{Aborted, HasName, ReportMsg, TUITask}
+import tui.{Aborted, Finished, HasName, InProgress, ReportMsg, Stopped, TUITask, TaskStatus}
 import zio.json.{DeriveJsonCodec, JsonCodec}
 import tui.layoutzEx._
 
@@ -19,6 +20,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
   val name: String = table.name
 
   def toCompareApplyTask(s1: DataSource, s2: DataSource, mock: Boolean): TUITask = {
+
     new TUITask(name) {
       override def go(cancel: () => Boolean, notice: ReportMsg => Unit): Unit = {
 
@@ -44,17 +46,68 @@ case class ComparePlan( table: TableInfo, // TableInfo,
     }
   }
 
+  def toCompareToFile(s1: DataSource, s2: DataSource, path: String): TUITask = {
+
+    import DiffRowSerDe.writeDiffRows
+
+    new TUITask(name) {
+      override def go(cancel: () => Boolean, notice: ReportMsg => Unit): Unit = {
+
+        val reportIt = makeReportIt(notice, false)
+        val comp = new TableComparer(self, false)
+
+        val it0 = comp.compareIt(s1, s2, reportIt)
+        val it = cancelleableIt(it0, cancel, None)
+        val filtered = it.filterNot(_.isInstanceOf[Same])
+        try{
+          val done = writeDiffRows(name, path, filtered, cancel, notice)
+          done match {
+            case Left(e) => notice(ReportMsg(name, s"[Write Abort] ${e.getMessage}", Aborted))
+            case Right(l) => notice(ReportMsg(name, s"[Write Done] diff.total = $l", Finished))
+          }
+        } finally {
+          it0.close()
+        }
+      }
+    }
+  }
+
+  def toApplyFromFile(s2: DataSource, path: String): TUITask = {
+
+    import DiffRowSerDe.readDiffRows
+
+    new TUITask(name) {
+      override def go(cancel: () => Boolean, notice: ReportMsg => Unit): Unit = {
+
+        val reportAp = makeReportAp(notice, false)
+        val con = s2.getConnection
+        try{
+          val it0 = readDiffRows(name, path, cancel, notice)
+          val done = it0.map( it =>
+            TableComparer.applyChanges( self, it, con, reportAp, debug= false)
+          )
+          done match {
+            case Left(e) => notice(ReportMsg(name, s"[Write Abort] ${e.getMessage}", Aborted))
+            case Right(l) => notice(ReportMsg(name, s"[Write Done] diff.total = $l", Finished))
+          }
+        } finally {
+          con.close()
+        }
+      }
+    }
+
+  }
+
   def makeReportIt(notice: ReportMsg => Unit, verbose: Boolean)
   =
     (r1:Long, r2:Long, s:Long, u:Long, a:Long, b:Long, m: String, fin: Boolean) => {
       val msg =
-        if (fin) s"match : $m ra:$r1 rb:$r2 sa:$s up:$u oa:$a ob:$b".color(Color.Yellow).render + " finished"
+        if (fin) s"match : $m ra:$r1 rb:$r2 sa:$s ".color(Color.Yellow).render + s"up:$u oa:$a ob:$b".color(Color.Green).render
         else s"match : $m ra:$r1 rb:$r2 sa:$s up:$u oa:$a ob:$b"
 
       val rm = ReportMsg(name, msg, if (fin) Finished else InProgress)
       notice(rm)
       if(verbose) println(rm.statusString)
-      ()
     }
 
   def makeReportAp(notice: ReportMsg => Unit, verbose: Boolean)
@@ -65,7 +118,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
 
     val rm = ReportMsg(name, msg, if (fin) Finished else InProgress)
     notice(rm)
-    if(verbose) println(rm)
+    if(verbose) println(rm.statusString)
   }
 
 
@@ -123,42 +176,6 @@ case class ComparePlan( table: TableInfo, // TableInfo,
     }
 
   }
-
-//  def goWith(s1: DataSource, s2: DataSource,
-//             count: Option[Int],
-//             applyTarget: Boolean,
-//             exceptSame: Boolean = false,
-//             compDebug: Boolean = false,
-//             applDebug: Boolean = false) {
-//
-//    val comp = new TableComparer(this, compDebug)
-//    val it = comp.compareIt(s1, s2, TableComparer.noticeIt)
-//    val sized = if(count.isEmpty) it else it.take(count.get)
-//    val filtered = if(exceptSame) sized.filterNot(_.isInstanceOf[Same]) else sized
-//    val logged = filtered.map{ dr =>
-//      val ser = dr.serialize
-//      val des = DiffRow.fromBytes(ser)
-//      if(compDebug) {
-//        println( "--- " + dr)
-//        println( "+++ " + des)
-//      }
-//      des
-//    }
-//
-//    if(applyTarget) {
-//      val con = s2.getConnection
-//      TableComparer.applyChanges(this,
-//        logged,
-//        if(applDebug) new Mockup.LoggingConnection else con,
-//        debug = applDebug)()
-//
-//      con.close()
-//      it.close()
-//    } else {
-//      logged.foreach(dr => println("."))
-//      it.close()
-//    }
-//  }
 
   val keyComps: List[(CValComp, Int, Int)] = compRow.sortKey.map { k =>
     val rA = sourceReaders.find(_.index == k.colA).get
@@ -241,11 +258,11 @@ object ComparePlan {
                        ) : Iterator[A]
   = new Iterator[A] {
     val nlimit = limit.getOrElse(0)
-    var n = 0
+    var n = 1
     override def hasNext: Boolean = it.hasNext
 
     override def next(): A = {
-      val needStop = cancel() || (nlimit != 0 && n > nlimit)
+      val needStop = cancel() || (nlimit != 0 && n >= nlimit)
 
       if(needStop) {
         it.close()

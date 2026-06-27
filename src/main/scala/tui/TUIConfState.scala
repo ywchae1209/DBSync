@@ -1,0 +1,437 @@
+package tui
+
+import schema.SchemaCompare.{compareSchemas, fetchSchema, fetchTableNames, jsonCodec}
+import schema.SchemaCompared._
+import schema.{ComparePlan, DBConf, SchemaCompared, TableInfo}
+import tui.SyncTUI.bullet
+import tui.TUIConfState.{dafaultConf1, defaultConf2}
+import tui.layoutzEx.InputPrompt.{askConfirm, readLineSeq, readNotEmpty}
+import tui.layoutzEx.JPromptShell.RuntimeShellInstance
+import tui.layoutzEx._
+import utils.LogHelper.{extractBetween, getFileList}
+import zio.json.{DecoderOps, EncoderOps}
+
+import java.nio.charset.StandardCharsets
+import java.nio.file.{Files, Paths}
+import javax.sql.DataSource
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.Future
+import scala.util.Try
+
+object TUIConfState {
+
+  val dafaultConf1 = DBConf(
+    url = "jdbc:oracle:thin:@192.168.0.78:1521/EE.oracle.docker",
+    user = "CDCTEST",
+    schema = "CDCTEST",
+    pass = "cdctest"
+    //    url = "jdbc:oracle:thin:@arkdata.iptime.org:1523/XE",
+  )
+
+  val defaultConf2 = DBConf(
+    url = "jdbc:oracle:thin:@192.168.0.78:1522/ORA19",
+    user = "CDCTEST",
+    schema = "CDCTEST",
+    pass = "cdctest"
+    //      url = "jdbc:oracle:thin:@arkdata.iptime.org:1523/XE",
+  )
+}
+
+case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(implicit sema: ScreenSemaphore) {
+
+  implicit val ioterm: Option[Terminal] = Some(inst.term)
+  implicit val iterm: Terminal = inst.term
+
+  private var planConf: String = "plan_temp.conf"
+  private var dbconf1: Option[DBConf] = Some(dafaultConf1)
+  private var dbconf2: Option[DBConf] = Some(defaultConf2)
+  private var Compared: Option[SchemaCompared] = None
+
+  private def notLoaded
+  = show(bullet + "configuration not loaded. use: " + "init | load".color(Color.Green).render)
+
+  def updateConSetting(kind: String, isA: Boolean) {
+
+    val c = if(isA) dbconf1 else dbconf2
+    val in = readLineSeq(inst.term, Seq(
+      (s"DB connect setting ($kind)",
+        " url     ? ".color(Color.Green).render, c.map(_.url)) -> false,
+      ("", " schema  ? ".color(Color.Green).render, c.map(_.schema)) -> false,
+      ("", " id      ? ".color(Color.Green).render, c.map(_.user)) -> false,
+      ("", " pwd     ? ".color(Color.Green).render, c.map(_.pass.mkString)) -> true,
+    ))
+
+    val conf = DBConf.apply(url= in(0), schema= in(1), user = in(2), pass= in(3))
+    conf.display(kind, show)
+
+    val confirm = askConfirm(inst.term)
+    if(!confirm) return
+
+    if(isA) {
+      dbconf1 = Some(conf)
+    } else {
+      dbconf2 = Some(conf)
+    }
+    show( bullet + s"DB connect setting($kind) is updated.")
+  }
+
+  def confOr(isA :Boolean) = {
+    if(isA)
+      dbconf1.orElse{show(bullet + "set source first"); None}.filter(_.passIsNotSet("source", show))
+    else
+      dbconf2.orElse{show(bullet + "set target first"); None}.filter(_.passIsNotSet("target", show))
+  }
+
+  def dbConfsOr: Option[(DBConf, DBConf)] = {
+    val c1 = confOr(isA = true)
+    val c2 = confOr(isA = false)
+    for{
+      r1 <- c1
+      r2 <- c2
+    } yield( r1 -> r2)
+  }
+
+  def dataSourcesOr: Option[(DataSource, DataSource)] = {
+
+    val out = for {
+      (c1, c2) <- dbConfsOr
+      d1 <- c1.dataSourceOr("source", show)
+      d2 <- c2.dataSourceOr("target", show)
+    } yield ( d1 -> d2)
+
+    out
+  }
+
+  def comparePlanOr = {
+    if(Compared.isEmpty) notLoaded
+    Compared
+  }
+
+  private def isEmpty[A](l: Seq[A]): Boolean = {
+    val empty = l.isEmpty
+    if (empty) show(bullet + "empty")
+    empty
+  }
+
+  def connect() {
+    val confs = dbConfsOr
+    if (confs.isEmpty) return
+    val (conf1, conf2) = confs.get
+
+    if( conf1.alreadyInitalized("source", show) || conf2.alreadyInitalized("target", show) ) {
+      val confirm = askConfirm(inst.term, bullet + "Re-initialize connection pool.")
+      if(!confirm)
+        return
+    }
+
+    val js = JobSpinner.jobSpinner[Boolean]("connect".color(Color.Green).render)
+    Future {
+      js.setMessage("connection pool for source..")
+      val ok1= conf1.initDataSource("source", s => js.setMessage( "(S) " + s))
+
+      js.setMessage("connection pool for target..")
+      val ok2= conf2.initDataSource("target", s => js.setMessage( "(S) " + s))
+
+      if (ok1 && ok2) {
+        js.setFinished(true)
+      } else {
+        conf1.close()
+        conf2.close()
+        js.setFinished(false)
+      }
+    }
+
+    js.run(clearOnStart= false, clearOnExit = false, terminal= ioterm)
+      .fold(
+        e => {show( bullet + s"fail to connect : ${e.toString}"); false},
+        r => r.getOr.getOrElse(false))
+  }
+
+  def selectNames(title: String, hdr: String, names: Seq[String]): Seq[String] = {
+
+    val rows = names.map(n => Seq(Text(n)))
+    val ss = MultiTable
+      .multiTable(title,  Seq(hdr), rows)
+      .run( clearOnStart=false, clearOnExit= false, terminal= Some(inst.term))
+      .map(_.selected).getOrElse(Set.empty)
+
+    val out = names.zipWithIndex.flatMap{ case (a, i) => if(ss.contains(i)) Some(a) else None}
+    out
+  }
+
+  def selectTableNames(ds1: DataSource, schema1: String,
+                       ds2: DataSource, schema2: String, all: Boolean): (Seq[String], Seq[String]) = {
+
+    val names1 = fetchTableNames(ds1, schema1)
+    val names2 = fetchTableNames(ds2, schema2)
+    if(all) names1 -> names2 else {
+      val t1 = selectNames("select tables", "Table", names1)
+      val t2 = names2.filter(n => t1.contains(n))
+      t1 -> t2
+    }
+  }
+
+  def init(all: Boolean): Unit = {
+
+    val ds = dataSourcesOr
+    if ( ds.isEmpty) return
+    val (ds1, ds2) = ds.get
+
+    val cf1= confOr(isA = true).get
+    val cf2 = confOr(isA = false).get
+
+
+    val js = JobSpinner.jobSpinner[SchemaCompared]("init".color(Color.Green).render)
+    val (ns1, ns2) = selectTableNames( ds1, cf1.schema, ds2, cf2.schema, all)
+
+    val start: Long = java.lang.System.currentTimeMillis()
+    Future {
+      val schema1 = fetchSchema(ds1, cf1.schema, ns1, s => js.setMessage("(S) " + s), 4)
+      val schema2 = fetchSchema(ds2, cf2.schema, ns2, s => js.setMessage("(T) " + s), 4)
+      val out = compareSchemas(cf1, cf2, schema1, schema2, s => js.setMessage("(F) " + s))
+      js.setFinished( out)
+    }
+
+    val ret = js
+      .run(clearOnStart= false, clearOnExit = false, terminal= ioterm)
+      .fold(
+        e => {show(bullet + "fail to init : " + e.toString ); None},
+        r => r.getOr
+      )
+
+    for( o <- ret) {
+      show(summary(o))
+      Compared = Some(o)
+      val end: Long = java.lang.System.currentTimeMillis()
+      show(bullet + s"done: ${end-start} ms")
+    }
+  }
+
+  def detail(l: List[TableInfo]) {
+    if(l.isEmpty) { show(bullet + "not exist") } else {
+      val ts = selectTables(l)
+      ts.foreach( t => show(tableDetail(t)) )
+    }
+  }
+
+  def save() {
+
+    val planOr = comparePlanOr
+    if(planOr.isEmpty) return
+
+    val pname = readNotEmpty( inst.term, "", "? plan name(use as legal filename) ? ".color(Color.Red).render, Some("wow"), false)
+    val fpath = s"plan_$pname.conf"
+
+    Try {
+      val p = Paths.get(fpath)
+      if (Files.exists(p)) throw new IllegalArgumentException(s"$fpath already exist.")
+      val j = planOr.get.toJsonPretty
+      val b = j.getBytes(StandardCharsets.UTF_8)
+      Files.write(p, b)
+      planConf = fpath
+      show(bullet + s"your plan is written to $fpath")
+      show(bullet + s"current plan name is $pname")
+    }.toEither
+      .left.foreach(e => show(bullet + s"failed to save($fpath) ".color(Color.Red).render + e.toString) )
+  }
+
+  def load() {
+
+    val list = getFileList("plan_", ".conf").fold(
+      e => { show(bullet + s"fail to locate plan conf: ${e.toString}"); List.empty},
+      r => r
+    )
+
+    val pname = SingleBox
+      .singleBox("select plan", list)
+      .run( clearOnStart= false, clearOnExit= false, terminal= Some(inst.term))
+      .fold(
+        e => {show(bullet + s"fail to select : ${e.toString}"); None},
+        r => extractBetween(r.selectedItem, "plan_", ".conf"))
+
+    if (pname.isEmpty) return
+
+    Try {
+      val fpath = s"plan_${pname.get}.conf"
+      val p = Paths.get(fpath)
+      val b = Files.readAllBytes(p)
+      val s = new String(b, StandardCharsets.UTF_8)
+      val o = s.fromJson[SchemaCompared]
+      o match {
+        case Left(s) =>
+          show(bullet + s"cannot load conf. $fpath : $s")
+        case Right(cp) =>
+          planConf = fpath
+          Compared = Some(cp)
+          dbconf1 = Some(cp.conf1)
+          dbconf2 = Some(cp.conf2)
+          show(bullet + s"plan conf is loaded. : $fpath")
+          show(bullet + s"current plan name is ${pname.get}")
+          cp.show_l(show)
+      }
+    }
+  }
+
+  def updateCount() {
+
+    val planOr = comparePlanOr
+    val ds = dataSourcesOr
+    if( planOr.isEmpty || ds.isEmpty) return
+
+    val sc = planOr.get
+    val cs = sc.comparable
+    val (ds1, ds2) = ds.get
+
+    if(isEmpty(cs)) return
+
+    val selected = selectTables(cs)
+    val js = JobSpinner.jobSpinner[Seq[TableInfo]](s"fetch count of ${selected.size} tables".color(Color.Cyan).render)
+
+    Future{
+      js.setMessage("start")
+      val update = selected.map{ s =>
+        js.setMessage(s"${s.name}")
+        s.fetchCount(ds1, ds2)
+      }
+      js.setMessage("done")
+
+      val copied = cs.map(c => update.find(s => s.name == c.name).getOrElse(c))
+      Compared = Compared.map( _.copy( comparable = copied))
+      js.setFinished(update)
+    }
+
+    js.run(clearOnStart= false, clearOnExit = false, terminal= ioterm)
+      .map(_.getOr.getOrElse(Seq.empty))
+      .foreach( a => show(tableOfInfos(a)) )
+  }
+
+  def withCompared( f: SchemaCompared => Unit)
+  : Unit = comparePlanOr.foreach( p => f(p))
+
+
+  def selectPlansNotIn(names: Set[String]): Seq[ComparePlan] = {
+    comparePlanOr.map{ cp =>
+      val ts = selectTables(cp.comparable.filterNot(c => names.contains(c.name)))
+      cp.comparePlans.filter(p => ts.exists( _.name == p.table.name) )
+    }.getOrElse(Seq.empty)
+  }
+
+  def selectPlansOr: Option[List[ComparePlan]] = comparePlanOr.map { o =>
+    val ts = selectTables(o.comparable)
+    o.comparePlans.filter(p => ts.exists( _.name == p.table.name) )
+  }
+
+  def selectPlans(): Seq[ComparePlan] = selectPlansOr.getOrElse(Seq.empty)
+
+  def selectPlans0(o: SchemaCompared): Seq[ComparePlan] = {
+    val ts = selectTables(o.comparable)
+    o.comparePlans.filter(p => ts.exists( _.name == p.table.name) )
+  }
+
+}
+
+case class TUIConfState( show: String => Unit, inst: RuntimeShellInstance)(implicit sema: ScreenSemaphore) {
+
+  val tuiCon = TUIConnection(show, inst)
+
+  // --------------------------------------------------------------------------------
+  def selectPlansNotIn(names: Set[String]): Seq[ComparePlan] = tuiCon.selectPlansNotIn(names)
+  def selectPlansOr = tuiCon.selectPlansOr
+  def selectPlans0(o: SchemaCompared): Seq[ComparePlan] = tuiCon.selectPlans0(o)
+
+  def updateConSetting(kind: String, isA: Boolean) = tuiCon.updateConSetting(kind, isA)
+  def connect() = tuiCon.connect()
+  def updateCount() = tuiCon.updateCount()
+  def save() = tuiCon.save()
+  def load() = tuiCon.load()
+  def dataSourcesOr = tuiCon.dataSourcesOr
+  // --------------------------------------------------------------------------------
+
+  private def showPlan(o: SchemaCompared) = {
+    val selected = selectPlans0(o)
+    selected.foreach(p => {
+      show("--------------------------------------------------")
+      show( rowElements(p.table).map(_.render).mkString(" "))
+      show("--------------------------------------------------")
+      show("1. sql: select".color(Color.Red).render)
+      show("   " + p.sourceSql)
+      show("2. sql: insert to target".color(Color.Red).render)
+      show("   " + p.insertSql)
+      show("3. sql: update to target".color(Color.Red).render)
+      show("   " + p.updateSql)
+      show("4. sql: delete from target".color(Color.Red).render)
+      show("   " + p.deleteSql)
+      show("")
+    })
+  }
+
+  private def withCompared( f: SchemaCompared => Unit): Unit = tuiCon.withCompared(f)
+  private def detail(l: List[TableInfo]) = tuiCon.detail(l)
+
+  def start_init(all: Boolean) = tuiCon.init(all)
+  def show_b     = withCompared(o => show(summary(o)))
+  def show_mka   = withCompared(_.show_mka(show))
+  def show_mkb   = withCompared(_.show_mkb(show))
+  def show_mca   = withCompared(_.show_mca(show))
+  def show_mcb   = withCompared(_.show_mcb(show))
+  def show_oa    = withCompared(_.show_oa (show))
+  def show_ob    = withCompared(_.show_ob (show))
+  def show_l     = withCompared(_.show_l  (show))
+  def show_ln    = withCompared(_.show_ln (show))
+  def show_lk    = withCompared(_.show_lk (show))
+  def show_mkad  = withCompared(o => detail(o.mismatchKey.map(_._1)))
+  def show_mkbd  = withCompared(o => detail(o.mismatchKey.map(_._2)))
+  def show_mcad  = withCompared(o => detail(o.mismatchCols.map(_._1)))
+  def show_mcbd  = withCompared(o => detail(o.mismatchCols.map(_._2)))
+  def show_oad   = withCompared(o => detail(o.onlyInDb1))
+  def show_obd   = withCompared(o => detail(o.onlyInDb2))
+  def show_d     = withCompared(o => detail(o.comparable))
+  def show_dn    = withCompared(o => detail(o.filterNoKey))
+  def show_dk    = withCompared(o => detail(o.filterKey))
+  def show_plan  = withCompared(o => showPlan(o))
+
+  // compare --------------------------------
+  def start_ps(n: Option[Int], debug: Boolean = false) {
+
+    dataSourcesOr.foreach { case (ds1, ds2) =>
+      val selected = tuiCon.selectPlans()
+      for (p <- selected) {
+        show(rowElements(p.table).map(_.render).mkString(" "))
+        p.goCompare(
+          s1 = ds1,
+          s2 = ds2,
+          limit = n,
+          cancel = () => false,
+          notice = _ => (),
+          verbose = true,
+          compDebug = debug)
+      }
+    }
+  }
+
+  // compare & apply ------------------------
+  def start_pa(n: Option[Int], compDebug: Boolean = false, toMock: Boolean = false) {
+    dataSourcesOr.foreach { case (ds1, ds2) =>
+      val selected = tuiCon.selectPlans()
+      if( !toMock) {
+        val confirm = askConfirm(inst.term, bullet + "Comparison results may be applied to target.")
+        if(!confirm)
+          return
+      }
+
+      for (p <- selected) {
+        show(rowElements(p.table).map(_.render).mkString(" "))
+        p.goCompareApply(
+          s1 = ds1,
+          s2 = ds2,
+          limit = n,
+          cancel = () => false,
+          notice = _ => (),
+          verbose = true,
+          compDebug = compDebug,
+          applDebug = toMock)
+      }
+    }
+  }
+}
+

@@ -67,7 +67,7 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
         if (fin || (sum % reportInterval == 0)) {
           val millis = System.currentTimeMillis()
           val now = Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDateTime
-          val str = startStr + ":@ " + now.toString + msg
+          val str = startStr + "--" + now.toString + msg
           updateState(readCount1, readCount2, sameCount, updCount, onlyACount, onlyBCount, str, fin)
         }
       }
@@ -81,7 +81,7 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
             cval
           } catch {
             case e: Exception =>
-              println(s"  [READ ERROR at Idx ${r.index}] Column: ${r.name}, Type: ${r.typeName}")
+              println(s"  [READ ERROR at Idx ${r.index}] Column: ${r.name}, Type: ${r.typeName} JDBCType: ${r.jdbcType}")
               println(s"  Reason: ${e.getMessage}")
               throw e
           }
@@ -200,7 +200,7 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
     while (diff == 0 && it.hasNext) {
       val (comp, colA, colB) = it.next()
       diff = comp.compare(srcRow(colA - 1), tgtRow(colB - 1))
-      if (diff != 0) println("diff: " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))
+//      if (diff != 0) println("diff: " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))
     }
     diff
   }
@@ -384,7 +384,7 @@ object TableComparer {
       case e: Exception =>
         notice(insCount, updCount, delCount, skiCount, true)
         targetConn.rollback()
-        oops("[DR Apply Failed]".color(Color.Red).render + s" last transaction rolled back. Reason: ${e.getMessage}")
+        oops("[Apply Target Stop]".color(Color.Red).render + s" last transaction rolled back. Reason: ${e.getMessage}")
     } finally {
       insStmt.close()
       updStmt.close()

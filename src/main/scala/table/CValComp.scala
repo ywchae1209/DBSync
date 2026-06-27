@@ -50,6 +50,7 @@ case class CValComp(colA: CReader,
       case (_, _: CNull)                      => if (nullAsSmallest) 1 else -1
       case (av: CVOrderable, bv: CVOrderable) => isAscending(av, bv)
       case (av: CVEquatable, bv: CVEquatable) => if (CValComp.isEqual(av, bv)) 0 else -1 // if not-equal, treat as asc.
+      case (av: CVIncomparable, bv: CVIncomparable) => if(CValComp.isEqual(av, bv)) 0 else -1
       case _ =>
         throw fault(s"Incomparable types: $a vs $b")
     }
@@ -86,17 +87,22 @@ object CValComp {
   def isEqual(a: CVEquatable, b: CVEquatable): Boolean = (a, b) match {
     case (CBoolean(_, x), CBoolean(_, y))             => x == y
     case (CBytes(_, x), CBytes(_, y))                 => util.Arrays.equals(x, y)
-    case (a:CLongString, b:CLongString)               => // memo("comparing : LongString")
-      a.longString.compare(b.longString) == 0
-    case (a:CLongBytes, b:CLongBytes)                 => // memo("comparing : LongBytes")
-      a.longBytes.compare(b.longBytes) == 0
+    case (a:CLongString, b:CLongString)               => a.longString.compare(b.longString) == 0 // memo("comparing : LongString")
+    case (a:CLongBytes, b:CLongBytes)                 => a.longBytes.compare(b.longBytes) == 0 // memo("comparing : LongBytes")
     case (COraGeometry(_, x), COraGeometry(_, y))     => fastEquals(x, y)// nestedEquals(x, y)
     case (CInterval(_, x), CInterval(_, y))           => x == y
     case (CXML(_, x), CXML(_, y))                     => xmlEquals(x, y)
     case _ => throw fault(s"isEqual: Not unsupported-type-columns")
   }
 
+  def isEqual(a: CVIncomparable, b: CVIncomparable): Boolean = (a, b) match {
+    case (CRowID(_, x), CRowID(_, y))     => x == y
+    case (CBFile(_, x), CBFile(_, y))     => x == y
+    case (CNotSupport(i, x), _)           => throw fault(s"isEqual: Not-Support type : idx = $i")
+    case (_, CNotSupport(i, x))           => throw fault(s"isEqual: Not-Support type : idx = $i")
+    case _                                => throw fault(s"isEqual: incomparable")
 
+  }
 
   def xmlEquals(a: String, b: String): Boolean = {
 

@@ -1,25 +1,46 @@
 package schema
 
+import schema.SchemaCompared.tableOfInfos
+import tui.SyncTUI.bullet
 import tui.layoutzEx._
 import utils.Implicits.ResultSetIter
 import zio.json.{DeriveJsonCodec, JsonCodec}
 
 import java.sql.{Connection, DatabaseMetaData}
-import javax.sql.DataSource
+import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.mutable
-import scala.util.Using
 
 // ================================================================================
-case class SchemaCompared(comparable: List[TableInfo],              // both have same structure
-                          mismatchKey: List[(TableInfo, TableInfo)],
-                          mismatchCols: List[(TableInfo, TableInfo)],
-                          onlyInDb1: List[TableInfo],
-                          onlyInDb2: List[TableInfo],
-                          comparePlans: List[ComparePlan],
+case class SchemaCompared( conf1: DBConf,
+                           conf2: DBConf,
+                           comparable: List[TableInfo],              // both have same structure
+                           mismatchKey: List[(TableInfo, TableInfo)],
+                           mismatchCols: List[(TableInfo, TableInfo)],
+                           onlyInDb1: List[TableInfo],
+                           onlyInDb2: List[TableInfo],
+                           comparePlans: List[ComparePlan],
                          ) {
   def get(tableName: String): Option[TableInfo] = comparable.find( _.name == tableName)
   def filterNoKey = comparable.filter(i => i.primaryKey.isEmpty && i.uniqueKeys.isEmpty)
   def filterKey = comparable.filter(i => i.primaryKey.isDefined || i.uniqueKeys.nonEmpty)
+
+  def show_mka(callback: String=> Unit)  = callback(tableOfInfos(mismatchKey.map(_._1)))
+  def show_mkb(callback: String=> Unit)  = callback(tableOfInfos(mismatchKey.map(_._2)))
+  def show_mca(callback: String=> Unit)  = callback(tableOfInfos(mismatchCols.map(_._1)))
+  def show_mcb(callback: String=> Unit)  = callback(tableOfInfos(mismatchCols.map(_._2)))
+  def show_oa (callback: String=> Unit)  = callback(tableOfInfos(onlyInDb1))
+  def show_ob (callback: String=> Unit)  = callback(tableOfInfos(onlyInDb2))
+  def show_ln (callback: String=> Unit)  = callback(tableOfInfos(filterNoKey))
+  def show_lk (callback: String=> Unit)  = callback(tableOfInfos(filterKey))
+  def show_l  (callback: String=> Unit)  = {
+    conf1.display("source", callback)
+    conf1.display("target", callback)
+    callback(tableOfInfos(comparable))
+  }
+
+
+
+
 }
 
 object SchemaCompare {
@@ -32,6 +53,55 @@ object SchemaCompare {
     }.toList
   }
 
+  import java.util.concurrent.Semaphore
+  import javax.sql.DataSource
+  import scala.concurrent.ExecutionContext.Implicits.global
+  import scala.concurrent.duration._
+  import scala.concurrent.{Await, Future}
+
+  def fetchTableNames(ds: DataSource, schema: String) = {
+    try{
+      val conn = ds.getConnection
+      try{
+        val meta = conn.getMetaData
+        val tableNames = getTableNames(schema, meta)
+        tableNames
+      } finally {
+        conn.close()
+      }
+    }
+  }
+
+  def fetchSchema(ds: DataSource, schema: String, tableNames: Seq[String], callback: String => Unit, parallelism: Int = 4)
+  : Map[String, TableInfo] = {
+
+    val semaphore = new Semaphore(parallelism)
+    val total = tableNames.size
+    val counter = new AtomicInteger(0)
+
+    val futures = tableNames.map { tableName =>
+      Future {
+        semaphore.acquire()
+        try {
+          val conn = ds.getConnection
+          try {
+            val current = counter.incrementAndGet()
+            callback(s"$current/$total $tableName..")
+            val ret = tableName -> TableInfo.apply0(conn, schema, tableName)
+            callback(s"$current/$total $tableName")
+            ret
+          } finally {
+            conn.close()
+          }
+        } finally {
+          semaphore.release()
+        }
+      }
+    }
+    Await.result(Future.sequence(futures), 60.minutes).toMap
+  }
+
+
   /** {{{
    *  |    DBMS    |   catalog      |  schema                                       |
    *  |:----------:|:--------------:|:---------------------------------------------:|
@@ -41,36 +111,42 @@ object SchemaCompare {
    *  | MSSQL      | DB name        | Schema name (e.g., dbo)         )             |
   }}}
   */
-  def fetchSchema(ds: DataSource, schema:String, callback: String => Unit): Map[String, TableInfo] = {
+  def fetchSchema0(ds: DataSource, schema:String, callback: String => Unit): Map[String, TableInfo] = {
 
     // todo :: exception
     val conn = ds.getConnection
     val meta: DatabaseMetaData = conn.getMetaData
     val tableNames = getTableNames(schema,meta) // todo :: oracle specific
-
-    val out = tableNames.map { tableName =>
-      callback( tableName)
-      tableName -> TableInfo(conn, schema, tableName)
-    }.toMap
-
     conn.close()
-    out
-  }
 
-  def showEncoding(conn: Connection) = {
-    val stmt = conn.createStatement()
-    val rs = stmt.executeQuery(
-      "SELECT PARAMETER, VALUE FROM NLS_DATABASE_PARAMETERS " +
-        "WHERE PARAMETER IN ('NLS_CHARACTERSET','NLS_NCHAR_CHARACTERSET','NLS_LANGUAGE')")
+    val batches = tableNames.grouped(4).toList
 
-    while (rs.next()) {
-      System.out.println(rs.getString("PARAMETER") + " = " + rs.getString("VALUE"))
+    import scala.concurrent.ExecutionContext.Implicits.global
+    val results: List[(String, TableInfo)] = batches.flatMap { batch =>
+      val futures = batch.map { tableName =>
+        Future {
+          val conn = ds.getConnection
+          try {
+            callback(s".$tableName")
+            val ret = tableName -> TableInfo.apply0(conn, schema, tableName)
+            callback(s"..$tableName")
+            ret
+          }
+          finally {
+            conn.close()
+          }
+        }
+      }
+      Await.result(Future.sequence(futures), 60.minutes)
     }
-    rs.close()
-    stmt.close()
+
+    results.toMap
   }
 
-  def compareSchemas(schema1: Map[String, TableInfo],
+
+  def compareSchemas(conf1: DBConf,
+                     conf2: DBConf,
+                      schema1: Map[String, TableInfo],
                      schema2: Map[String, TableInfo],
                      callback: String => Unit): SchemaCompared = {
 
@@ -101,6 +177,8 @@ object SchemaCompare {
     callback("make compare plan")
     val comparePlans = comparable.map(c => ComparePlan.apply(c, false))
     SchemaCompared(
+      conf1.withoutPass,
+      conf2.withoutPass,
       comparable,
       keyMismatch.toList.sortBy(_._1.name),
       columnMismatch.toList.sortBy(_._1.name),
@@ -198,14 +276,15 @@ object SchemaCompared {
   }
 
   def tableOfInfos(l: Seq[TableInfo]): String = {
-    if(l.isEmpty) return "empty"
+    if(l.isEmpty) return (bullet + "empty")
 
     val (hdr, rows) = headerAndRows(l)
     val str = table( hdr, rows )
     str.render
   }
 
-  def selectTables(l: Seq[TableInfo])(implicit term: Terminal, screenSemaphore: ScreenSemaphore): Seq[TableInfo] = {
+  def selectTables(l: Seq[TableInfo])
+                  (implicit term: Terminal, screenSemaphore: ScreenSemaphore): Seq[TableInfo] = {
     if(l.isEmpty)
       return List.empty
 
@@ -218,7 +297,4 @@ object SchemaCompared {
     val tables = l.zipWithIndex.flatMap{ case (a, i) => if(ss.contains(i)) Some(a) else None }
     tables
   }
-
 }
-
-

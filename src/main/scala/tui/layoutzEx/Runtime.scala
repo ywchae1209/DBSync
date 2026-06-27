@@ -471,8 +471,7 @@ trait LayoutzApp[State, Message] {
       clearOnExit,
       alignment
     )
-    LayoutzRuntime.run(this, config, terminal)
-  }
+    LayoutzRuntime.run(this, config, terminal)}
 }
 
 private[layoutzEx] object LayoutzRuntime {

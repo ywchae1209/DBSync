@@ -47,6 +47,69 @@ object TableInfo {
 
   implicit val jsonCodec: JsonCodec[TableInfo] = DeriveJsonCodec.gen[TableInfo]
 
+  // --------------------------------------------------------------------------------
+  private def getPrimaryKeyMap0(conn: Connection, schema: String, table: String): Map[String, Int] = {
+    val sql =
+      """SELECT cols.column_name, cols.position
+       FROM all_constraints cons
+       JOIN all_cons_columns cols
+         ON cons.constraint_name = cols.constraint_name
+        AND cons.owner = cols.owner
+      WHERE cons.constraint_type = 'P'
+        AND cons.owner = ?
+        AND cons.table_name = ?"""
+    val ps = conn.prepareStatement(sql)
+    ps.setString(1, schema.toUpperCase)
+    ps.setString(2, table.toUpperCase)
+    val rs = ps.executeQuery()
+    val result = Iterator.continually(rs).takeWhile(_.next()).map { r =>
+      r.getString(1) -> r.getInt(2)
+    }.toMap
+    rs.close()
+    ps.close()
+    result
+  }
+
+  private def getUniqueKeys0(conn: Connection, schema: String, table: String): Set[KeyCol] = {
+    val sql =
+      """SELECT ind.index_name, col.column_name, col.column_position
+       FROM all_indexes ind
+       JOIN all_ind_columns col
+         ON ind.index_name = col.index_name
+        AND ind.owner = col.index_owner
+      WHERE ind.uniqueness = 'UNIQUE'
+        AND ind.table_owner = ?
+        AND ind.table_name = ?"""
+    val ps = conn.prepareStatement(sql)
+    ps.setString(1, schema.toUpperCase)
+    ps.setString(2, table.toUpperCase)
+    val rs = ps.executeQuery()
+    val rows = Iterator.continually(rs).takeWhile(_.next()).map { r =>
+      (r.getString("INDEX_NAME"), r.getInt("COLUMN_POSITION"), r.getString("COLUMN_NAME"))
+    }.toList
+    rs.close(); ps.close()
+    rows.groupBy(_._1).map { case (name, cols) =>
+      KeyCol(name, cols.sortBy(_._2).map(_._3))
+    }.toSet
+  }
+
+  // --------------------------------------------------------------------------------
+  def apply0(conn: Connection, schema: String, table: String): TableInfo = {
+    val pkMap = getPrimaryKeyMap0(conn, schema, table)
+    val cols = getColumns(conn.getMetaData, schema, table, pkMap)
+    val pkCols = pkMap.toList.sortBy(_._2).map(_._1)
+
+    val primaryKey = if (pkCols.nonEmpty) Some(KeyCol("PRIMARY", pkCols)) else None
+
+    val uniqueKeys: Set[KeyCol] = primaryKey match {
+      case None => getUniqueKeys0(conn, schema, table).filterNot(uk => primaryKey.exists(_.cols == uk.cols))
+      case Some(_) => Set.empty
+    }
+
+    new TableInfo(table, Option(schema), cols, primaryKey, uniqueKeys)
+  }
+
+  // --------------------------------------------------------------------------------
   def apply(conn: Connection, schema: String, table: String): TableInfo = {
 
     val meta = conn.getMetaData

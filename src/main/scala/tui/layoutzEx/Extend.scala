@@ -71,7 +71,7 @@ object JPromptShell {
 
     def setStatusHeight(h: Int) = { barHeight = h }
 
-    def setBatStates(st: Option[TUIBarStates])= lockT.synchronized { barStates = st }
+    def setBarStates(st: Option[TUIBarStates])= lockT.synchronized { barStates = st }
     def getBarStatesMsg = barStates.map( _.getStatusMsg()).getOrElse(List.empty)
 
     // --------------------------------------------------------------------------------
@@ -382,6 +382,8 @@ object InputPrompt {
 // ================================================================================
 object JobSpinner {
 
+  val bullet = "> ".color(Color.Yellow).render
+
   trait withJobCallback[A]{
     def setFinished(a: A): Unit
     def setMessage(s: String): Unit
@@ -412,8 +414,7 @@ object JobSpinner {
             }
         }
 
-      override def subscriptions(state: JSState[A]): Sub[JSMsg] =
-        Sub.time.everyMs(32, JSTick)
+      override def subscriptions(state: JSState[A]): Sub[JSMsg] = Sub.time.everyMs(32, JSTick)
 
       def progressBar(tick: Int) = {
         val width = 50
@@ -431,10 +432,10 @@ object JobSpinner {
         if(done.isEmpty)
           row (
             progressBar(state.tick),
-            spinner(s"$name... : $desc", state.tick/3)
+            spinner(s"$name $desc", state.tick/3)
           )
         else
-          rowTight( Text("finished "), Text(name).color(Color.Green) )
+          rowTight( "> ".color(Color.Yellow), Text("finished "), Text(name).color(Color.Green) )
       }
     }
 }
@@ -574,7 +575,6 @@ object SingleBox {
 
     override def viewAll: Element = {
       toElement(init._1.copy(cursor = -1, active = false), totalRow)
-
     }
 
     override def view(state: SBState): Element = {

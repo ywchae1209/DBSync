@@ -14,10 +14,10 @@ object LogHelper {
   // --------------------------------------------------------------------------------
   private def showLog(s: => String) = System.err.println(s)
 
-  def memo(s: => String): Unit = { showLog("\tMemo:\t" + s) }
-  def note(s: => String): Unit = { showLog("Note:\t" + s) }
-  def mark(s: => String): Unit = { showLog("Mark:\t" + s) }
-  def oops(s: => String): Unit = { showLog("Oops:\t" + s) }
+  def memo(s: => String): Unit = { showLog("\t" + s) }
+  def note(s: => String): Unit = { showLog("@\t" + s) }
+  def mark(s: => String): Unit = { showLog("*\t" + s) }
+  def oops(s: => String): Unit = { showLog("!\t" + s) }
 
   def memo(h: => String, s: => String): Unit = { memo( h + "\n" + s) }
   def note(h: => String, s: => String): Unit = { note( h + "\n" + s) }
@@ -72,6 +72,19 @@ object LogHelper {
     if (end == -1) return None
 
     Some(s.substring(from, end))
+  }
+
+  def getFileSzList(prefix: String, suffix: String, dir: String = "."): Either[Throwable, List[(String, Long)]] = {
+    Try {
+      val path = Paths.get(dir)
+      Files.list(path)
+        .iterator()
+        .asScala
+        .filter(Files.isRegularFile(_)) // 파일만
+        .map(p => (p.getFileName.toString, Files.size(p))) // (파일명, 파일크기)
+        .filter { case (name, _) => name.startsWith(prefix) && name.endsWith(suffix) }
+        .toList
+    }.toEither
   }
 
   def getFileList(prefix: String, suffix: String, dir: String = "."): Either[Throwable, List[String]]
