@@ -9,18 +9,18 @@ object DiffRow {
 }
 
 final case class OnlyInA(keys: List[CVal], sourceVals: List[CVal]) extends DiffRow {
-  override def toString: String = keys.mkString("A(@:[", ", ", "],") + sourceVals.mkString("#:[", ", ", "]")
+  override def toString: String = keys.mkString("A (@:[", ", ", "],") + sourceVals.mkString("#:[", ", ", "]")
 }
 final case class OnlyInB(keys: List[CVal] ) extends DiffRow {
-  override def toString: String = keys.mkString("B(@:[", ", ", "])")
+  override def toString: String = keys.mkString("B (@:[", ", ", "])")
 }
 
 final case class Update(keys: List[CVal], sourceVals: List[CVal] ) extends DiffRow {
-  override def toString: String = keys.mkString("U(@:[", ", ", "],") + sourceVals.mkString("A:[", ", ", "]")
+  override def toString: String = keys.mkString("U (@:[", ", ", "],") + sourceVals.mkString("A:[", ", ", "]")
 }
 
 final case class Same(keys: List[CVal] ) extends DiffRow {
-  override def toString: String = keys.mkString("S(@:[", ", ", "])")
+  override def toString: String = keys.mkString("S (@:[", ", ", "])")
 }
 
 import oracle.spatial.util.WKB
@@ -30,26 +30,51 @@ import table.LongCollection.LongString.fromString
 import tui.{ReportMsg, Stopped}
 
 import java.io.ByteArrayOutputStream
+import scala.util.Try
 
 object DiffRowSerDe {
 
   import java.io.FileOutputStream
   import java.io.FileInputStream
   import scala.util.Using
-
-  def readDiffRows(name: String, path: String,
-                   cancel: () => Boolean, callback: ReportMsg => Unit)
-  : Either[Throwable, Iterator[DiffRow]] = {
-    Using(new FileInputStream(path)) { fis =>
+  def readDiffRows(
+                    name: String,
+                    path: String,
+                    cancel: () => Boolean,
+                    callback: ReportMsg => Unit
+                  ): Either[Throwable, Iterator[DiffRow]] = {
+    Try {
+      val fis = new FileInputStream(path)
       val unpacker: MessageUnpacker = MessagePack.newDefaultUnpacker(fis)
 
-      Iterator.continually {
-        if(cancel()) {
-          callback( ReportMsg(name, "[Read Stopped] $path by user", Stopped))
-          None
-        } else if (unpacker.hasNext) Some(unpackDiffRow(unpacker))
-        else None
-      }.takeWhile(_.isDefined).map(_.get)
+      new Iterator[DiffRow] {
+        private var nextRow: Option[DiffRow] = fetchNext()
+
+        private def fetchNext(): Option[DiffRow] = {
+          if (cancel()) {
+//            println("readDiffRows cancelled")
+            callback(ReportMsg(name, s"[Read Stopped] $path by user", Stopped))
+            None
+          } else if (unpacker.hasNext) {
+//            println("readDiffRows continue")
+            val out = unpackDiffRow(unpacker)
+//            println(out.toString)
+            Some(out)
+          } else {
+//            println("readDiffRows finished")
+            fis.close()
+            None
+          }
+        }
+
+        override def hasNext: Boolean = nextRow.isDefined
+
+        override def next(): DiffRow = {
+          val current = nextRow.get
+          nextRow = fetchNext()
+          current
+        }
+      }
     }.toEither
   }
 
@@ -229,7 +254,7 @@ object DiffRowSerDe {
         Same(keys)
 
       case unknown =>
-        throw new IllegalArgumentException(s"알 수 없는 DiffRow 타입 식별자 변조 포착: $unknown")
+        throw new IllegalArgumentException(s"unknown type ID: $unknown")
     }
   }
 

@@ -5,9 +5,10 @@ import schema.SchemaCompared._
 import tui.layoutzEx.InputPrompt._
 import tui.layoutzEx.JPromptShell._
 import tui.layoutzEx._
+import _root_.table.DiffRowSerDe
 import utils.LogHelper.getFileSzList
-
 import zio.Runtime
+
 import java.nio.file.{Files, Paths}
 import scala.Console.println
 
@@ -58,15 +59,23 @@ object SyncTUI {
           tuiConfState
         }
 
-        def showJobRunning(implicit show: String => Unit) = show(bullet + "make a job first.")
-        def showJobNotRunning(implicit show: String => Unit) = show(bullet + "No job is running.")
+        def jobHaveResult(implicit show: String => Unit, rt: Runtime[Any]) = {
+          tuiJobState.exists(j => j.isRunning || j.isDone)
+        }
+
         def jobIsRunning(implicit show: String => Unit, rt: Runtime[Any]) = {
           val out = tuiJobState.exists(_.isRunning)
           if(out)
-            show(bullet + s"job (${tuiJobState.get.name}) is running.")
+            show(bullet + s"Job(${tuiJobState.get.name}) is running.")
           out
         }
 
+        def jobIsDone(implicit show: String => Unit, rt: Runtime[Any]) = {
+          val out = tuiJobState.exists(_.isDone)
+          if(out)
+            show(bullet + s"Job(${tuiJobState.get.name}) is done. see result with " + "jd".color(Color.Green).render)
+          out
+        }
         def makeJob()(implicit show: String => Unit, inst: RuntimeShellInstance)
         : Option[TUIJob[ComparePlan]] = {
 
@@ -75,7 +84,7 @@ object SyncTUI {
               show(bullet + s"new job is not created.")
               None
             } else {
-              val jname = readNotEmpty( inst.term, "", "? job name(use as legal filename) ? ".color(Color.Red).render, Some("myJob"), false)
+              val jname = readNotEmpty( inst.term, "", "? job name(use as legal filename) ? ".color(Color.Yellow).render, Some("myJob"), false)
               val out = TUIJob[ComparePlan](show, inst, jname) //, p => TUITask(p.name)) // todo ::
               for (p <- ps) {
                 out.add(p)
@@ -89,39 +98,59 @@ object SyncTUI {
         def withJob( f: TUIJob[ComparePlan] => Unit)(implicit show: String => Unit, inst: RuntimeShellInstance): Unit
         = tuiJobState match {
             case Some(s) => f(s)
-            case None => showJobRunning
+            case None => show(bullet + "no job exist. make new job with " + "jn".color(Color.Green).render)
           }
 
         def listJob(implicit show: String => Unit, inst: RuntimeShellInstance, rt: Runtime[Any]) {
           withJob{ j =>
             val ps = j.list()
-            show(bullet + "Job List : tables")
+            show(bullet + s"job(${j.name}) : tables")
             show( tableOfInfos( ps.map(_._2.table).toSeq) )
-            if(j.isRunning) showJobRunning
+
+            if(j.isRunning) {
+              show(bullet + s"state: running. ses detail with " + "jd".color(Color.Green).render)
+            } else if(j.isDone) {
+              show(bullet + s"state: done. ses detail with " + "jd".color(Color.Green).render)
+            }
           }
         }
 
         def delJob(implicit show: String => Unit, inst: RuntimeShellInstance, rt: Runtime[Any]) {
           withJob{ j =>
-            if(j.isRunning) showJobRunning else {
+            if(j.isRunning) {
+              show(bullet + s"try after job(${j.name}) done.")
+            } else if(j.isDone) {
+              show(bullet + s"previous job(${j.name}) is done. make new job with " + "jn".color(Color.Green).render)
+            } else {
               val ps = j.list()
               val tb = ps.map(_._2.table)
               implicit val iterm: Terminal = inst.term
               val ss = selectTables(tb.toSeq).map(_.name)
-              j.removeIf(k => ss.contains(k))
-              show( bullet + s"delete ${ss.size} tables from job ")
-              listJob
+              if(ss.nonEmpty){
+                j.removeIf(k => ss.contains(k))
+                show(bullet + s"delete ${ss.size} tables from job(${j.name})")
+                listJob
+              } else
+                show(bullet + s"nothing to delete.")
             }
           }
         }
 
         def insJob(implicit show: String => Unit, inst: RuntimeShellInstance, rt: Runtime[Any]) {
           withJob{ j =>
-            if(j.isRunning) showJobRunning else {
+            if(j.isRunning) {
+              show(bullet + s"try after job(${j.name}) done.")
+            } else if(j.isDone) {
+              show(bullet + s"previous job(${j.name}) is done. make new job with " + "jn".color(Color.Green).render)
+            } else {
               val ps0 = j.list()
               val ss = tuiConf.selectPlansNotIn(ps0.map(_._2.table.name).toSet)
-              ss.foreach(j.add)
-              show(bullet + s"insert ${ss.size} table to job")
+              if(ss.nonEmpty) {
+                ss.foreach(j.add)
+                show(bullet + s"add ${ss.size} table to job(${j.name})")
+              } else
+                show(bullet + s"nothing left to add.")
+
             }
           }
         }
@@ -129,56 +158,69 @@ object SyncTUI {
         def newJob(implicit show: String => Unit, inst: RuntimeShellInstance, rt: Runtime[Any]) {
           tuiJobState match {
             case Some(j) =>
-              if (!jobIsRunning) {
-                val confirm = askConfirm(inst.term, bullet + s"Job(${j.name}) list(not-running) will be cleared\n")
+              if(j.isRunning) {
+                show(bullet + s"try after job(${j.name}) done.")
+              } else {
+                val confirm = {
+                  if (j.isDone) {
+                    show(bullet + s"previous job-result exists. see result with " + "jd".color(Color.Green).render)
+                    askConfirm(inst.term, bullet + s"previous information will be cleared.\n")
+                  } else true
+                }
                 if (confirm) {
                   tuiJobState = makeJob()
                 }
               }
-            case None =>
-              tuiJobState = makeJob()
+            case None => tuiJobState = makeJob()
           }
         }
 
         def detailJob(implicit show: String => Unit, inst: RuntimeShellInstance, rt: Runtime[Any]): Unit = {
           withJob{ j =>
-            val oss = j.getSnapshot
-            if(oss.isEmpty){
-              show(bullet + "sorry. i can't get job state.(may not in progress) retry..")
-              return
-            }
-            val jl = j.list()
-            show( jl.keys.mkString( s"----- tasks in job (${jl.size})\n  ".color(Color.Green).render, "\n  ", "" ) )
+            if(jobHaveResult) {
+              val oss = j.getSnapshot
+              if(oss.isEmpty){
+                show(bullet + "i can't get job state. retry..")
+                return
+              }
+              val jl = j.list()
+              show(s"----- ${j.name} : tables (${jl.size})".color(Color.Green).render)
 
-            val ss = j.getSnapshot.get
+              val ss = j.getSnapshot.get
 
-            val grouped = ss.reports.groupBy(_._2.state)
-            show( s"----- current progress (${ss.state})".color(Color.Cyan).render)
-            grouped.foreach{ case (st, vals) =>
-              show( vals.map{case (n, rm) => rm.statusString }
-                .mkString(s"@ $st (${vals.size})\n  ".color(Color.Cyan).render, "\n  ", ""))
+              val grouped = ss.reports.groupBy(_._2.state)
+              show( s"----- ${j.name} : current progress (${ss.state})".color(Color.Cyan).render)
+              grouped.foreach{ case (st, vals) =>
+                show( vals.map{case (n, rm) => rm.statusString }
+                  .mkString(s"@ $st (${vals.size})\n  ".color(Color.Cyan).render, "\n  ", ""))
+              }
             }
           }
         }
+
         def stopAllJob(mode: StopMode)(implicit show: String => Unit, inst: RuntimeShellInstance, rt: Runtime[Any]): Unit = {
           withJob{ j =>
-            if(!j.isRunning) showJobNotRunning else {
+            if (j.isRunning) {
               val confirm = askConfirm(inst.term,
                 mode match {
-                  case SM_all       => bullet+"stop " + "all & waiting".color(Color.Green).render + " tasks.\n"
-                  case SM_activeAll => bullet+"stop " + "current active".color(Color.Green).render + " tasks.\n"
-                  case SM_select    => bullet+"command error. please report to developer.\n"
-                } )
-              if(confirm) j.stopAsync(rt, mode)
+                  case SM_all => bullet + "stop " + "all & waiting".color(Color.Green).render + " tasks.\n"
+                  case SM_activeAll => bullet + "stop " + "current active".color(Color.Green).render + " tasks.\n"
+                  case SM_select => bullet + "command error. please report to me.\n"
+                })
+              if (confirm) j.stopAsync(rt, mode)
+            } else {
+              show(bullet + "no job is running.")
             }
           }
         }
 
         def stopJobs(names: List[String])(implicit show: String => Unit, inst: RuntimeShellInstance, rt: Runtime[Any]): Unit = {
-          if(names.isEmpty) show( bullet + "input task to stop.")
+          if(names.isEmpty) show( bullet + "input table-name to stop.")
           else withJob{ j =>
-            if(!j.isRunning) showJobNotRunning else {
-              names.foreach ( n => j.stopAsync(rt, SM_select, n) )
+            if (j.isRunning) {
+              names.foreach(n => j.stopAsync(rt, SM_select, n))
+            } else {
+              show(bullet + "no job is running.")
             }
           }
         }
@@ -187,7 +229,10 @@ object SyncTUI {
         : Unit = {
           val current = new java.io.File(".")
           val jcfs = current.listFiles().filter( f => f.isDirectory && f.getName.startsWith("jcf_")).map(_.getName)
-          if(jcfs.isEmpty) return
+          if(jcfs.isEmpty) {
+            show(bullet + "no jcf out exists")
+            return
+          }
 
           val jcf = SingleBox.singleBox("select jcf path", jcfs)
             .run( clearOnStart = false, clearOnExit = false, terminal = Some(inst.term))
@@ -197,16 +242,39 @@ object SyncTUI {
             )
 
           if(jcf.isEmpty) return
+          val pn = jcf.get
 
-          val list = getFileSzList("", ".msgpack", jcf.get).fold(
-            e => { show(bullet + s"fail to find jcf-outs: ${e.toString}"); List.empty},
-            r => r
+          val list = getFileSzList("", ".msgpack", pn).fold(
+            e => { show(bullet + s"fail to find jcf-outs: ${e.getMessage}"); List.empty},
+            r => r.filter(_._2 > 0)
           )
-
+          show(bullet + s"${list.size} files exist.")
           val n = SingleBox
-            .singleBox("select jcf data", list.map(fs => fs._1))
+            .singleBox("select jcf file", list.map(fs => fs._1 ))
             .run( clearOnStart = false, clearOnExit = false, terminal = Some(inst.term))
+            .fold(
+              e => {show(bullet + s"fail to select : ${e.message}");None},
+              r => Some(r.selectedItem)
+            )
+          if(n.isEmpty) return
+          val fn = n.get
 
+          val full = Paths.get(pn).resolve(fn).toString
+          show(bullet + "selected " + full.color(Color.Green).render)
+
+          val ii = DiffRowSerDe.readDiffRows(fn, full, () => false, rm => show(rm.statusString))
+            .fold(
+              e => {show(bullet + e.getMessage); Iterator.empty},
+              r => r )
+
+          val skey = "s q ESC".color(Color.Green).render
+          val okey = "other-key(ex: space)".color(Color.Green).render
+          show(bullet + s"press ${skey} to stop, $okey to see next")
+          ii.grouped(5).foreach{ dr =>
+            val stop = readForStopOr(inst.term)
+            if(stop) return
+            dr.foreach(l => show(bullet + l.toString) )
+          }
         }
 
         def fileToApplyJob(par: Int)(implicit show: String => Unit, inst: RuntimeShellInstance, rt: Runtime[Any])
@@ -224,22 +292,38 @@ object SyncTUI {
             )
 
           if(jcf.isEmpty) return
+          val pn = jcf.get
 
-          val list = getFileSzList("", ".msgpack", jcf.get).fold(
+          val list = getFileSzList("", ".msgpack", pn).fold(
             e => { show(bullet + s"fail to find jcf-outs: ${e.toString}"); List.empty},
             r => r
           )
 
-          val n = MultiTable
+          val ss: Set[Int] = MultiTable
             .multiTable("select jcf data", Seq("file", "bytes"), list.map(fs => Seq(fs._1, f"${fs._2}%13d")))
             .run( clearOnStart = false, clearOnExit = false, terminal = Some(inst.term))
+            .fold(
+              e => {show(bullet + s"fail to select : ${e.message}"); Set.empty},
+              r => r.selected
+            )
+          val ns = list.zipWithIndex.filter{ case ((n, s), i) => ss.contains(i)}.map( _._1._1)
+
+          show( bullet + "todo:: not implemented yet. " + ns.mkString("selected: ", ", ", ""))
         }
 
-
-        def compareToFileJob(path: String, par: Int)
+        def compareToFileJob(par: Int)
                              (implicit show: String => Unit, inst: RuntimeShellInstance, rt: Runtime[Any]): Unit = {
           withJob{ j =>
 
+            if(j.isRunning) {
+              show(bullet + s"try after job(${j.name}) done.")
+              return
+            } else if(j.isDone) {
+              show(bullet + s"previous job(${j.name}) is done. see " + "jd jn".color(Color.Green).render)
+              return
+            }
+
+            val path = j.name
             val f = tuiConf.dataSourcesOr.map { case (ds1, ds2) =>
               (cp: ComparePlan) => {
                 val p = Paths.get(path, cp.name + ".msgpack").toString
@@ -248,9 +332,15 @@ object SyncTUI {
             }
             if(f.isEmpty) return
 
+            val jcf = "jcf".color(Color.Green).render
             val sz = j.list().size
-            val confirm = askConfirm(inst.term, bullet + s"Job(Compare to file) start($sz tables) with $par threads.\n")
+            val confirm = askConfirm(inst.term, bullet + s"$jcf(compare-to-file: ${j.name}) start($sz tables) with $par threads.\n")
             if(confirm) {
+
+              val dir = Files.createDirectories(Paths.get(".").resolve(path)) // create path
+              // todo ::: save compare to disk.
+
+              show(bullet + s"result will be stored in $path")
               if(par > 4) { show( bullet + s"$par is too many. i'll use 4 threads.(DBMS may overburden)") }
               val n = par.min(4)
               val st = j.startAsync(f.get, rt, n)
@@ -258,7 +348,7 @@ object SyncTUI {
                 inst.setBarStates(st.map(_.getRunningState))
                 inst.showStatusBar()
               } else {
-                show(bullet + s"fail: start to compare-apply with par($n)")
+                show(bullet + s"fail: start $jcf with par($n)")
               }
             }
           }
@@ -268,11 +358,19 @@ object SyncTUI {
                              (implicit show: String => Unit, inst: RuntimeShellInstance, rt: Runtime[Any]): Unit = {
           withJob{ j =>
 
+            if(j.isRunning) {
+              show(bullet + s"try after job(${j.name}) done.")
+              return
+            } else if(j.isDone) {
+              show(bullet + s"previous job(${j.name}) is done. see " + "jd jn".color(Color.Green).render)
+              return
+            }
+
             val f = tuiConf.dataSourcesOr.map{ case (ds1, ds2) => (_: ComparePlan).toCompareApplyTask(ds1, ds2, toMock) }
             if( f.isEmpty) return
 
             val sz = j.list().size
-            val confirm = askConfirm(inst.term, bullet + s"Job(Compare & Apply) start($sz tables) with $par threads.\n")
+            val confirm = askConfirm(inst.term, bullet + s"Compare-and-Apply start($sz tables) with $par threads.\n")
             if(confirm) {
               if(par > 4) { show( bullet + s"$par is too many. i'll use 4 threads.(DBMS may overburden)") }
               val n = par.min(4)
@@ -308,9 +406,10 @@ object SyncTUI {
           "\n" + bullet +"init   : so|source ta|target co|connect in|init cn|count sa|save lo|load".color(Color.BrightGreen).render +
           "\n" + bullet +"table  : br|brief mka mkb mca mcb oa ob l|list ln|lnokey lk|lkey".color(Color.BrightGreen).render +
           "\n" + bullet +"schema : d|def dn|dnokey dk|dkey mkad mkbd mcad mcbd oad obd".color(Color.BrightGreen).render +
-          "\n" + bullet +"plan   : p|plan ps|dnokey ps[10] psa psd[n] pa[n] pad[a] padd[n]".color(Color.BrightGreen).render +
-          "\n" + bullet +"job    : jn|jnew jl jlr|jld jla|jli jaa jaad js|jstop[name..] jsc jsa jd|jdetail" .color(Color.BrightGreen).render +
-          "\n" + bullet +"         jw jcf jfa".color(Color.Green).render
+          "\n" + bullet +"plan   : p|plan sw ps|dnokey ps[10] psa psd[n] pa[n] pad[a] padd[n]".color(Color.BrightGreen).render +
+          "\n" + bullet +"job    : jn|jnew jl jlr|jld jla|jli js|jstop[name..] jsc jsa jd|jdetail" .color(Color.BrightGreen).render +
+          "\n" + bullet +"       : jaa jaad jcf jfv" .color(Color.BrightGreen).render +
+          "\n" + bullet +"         jfa ".color(Color.Green).render
 
         def help(show: String => Unit) = show(helpStr)
 
@@ -350,6 +449,7 @@ object SyncTUI {
             case "oad"          => tuiConf.show_oad
             case "obd"          => tuiConf.show_obd
             case "p" | "plan"   => tuiConf.show_plan
+            case "sw"           => tuiConf.setWhere
             case "ps"           => tuiConf.start_ps(Some(toIntOr(rest.headOption, 10)))
             case "psa"          => tuiConf.start_ps(None)
             case "psd"          => tuiConf.start_ps(Some(toIntOr(rest.headOption, 5)), debug = true)
@@ -368,15 +468,9 @@ object SyncTUI {
             case "js" |"jstop"  => stopJobs(rest)
             case "jd" |"jdetail"=> detailJob
             case "jw"           => show(bullet + "todo".color(Color.Yellow).render + " Job set WHERE clause will be added soon.") // todo
-            case "jcf"          =>
-              val path = rest.headOption.map(s => "jcf_" + s.trim).getOrElse("jcf_out")
-              val full = Paths.get(".").resolve(path)
-              val dir = Files.createDirectories(full) // create path
-              compareToFileJob(full.toString, 4)
-
+            case "jcf"          => compareToFileJob(4)  // todo :: conf save
             case "jfv"          => fileToView()
-            case "jfa"          => fileToApplyJob(4)
-
+            case "jfa"          => fileToApplyJob(toIntOr(rest.headOption, 2)) // todo
             case "jaa"          => compareToApplyJob0(toMock = false, toIntOr(rest.headOption, 2))
             case "jaad"         => compareToApplyJob0(toMock = true, toIntOr(rest.headOption, 2))
 

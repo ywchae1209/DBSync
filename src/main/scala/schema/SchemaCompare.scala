@@ -9,6 +9,7 @@ import zio.json.{DeriveJsonCodec, JsonCodec}
 import java.sql.{Connection, DatabaseMetaData}
 import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.mutable
+import scala.util.Try
 
 // ================================================================================
 case class SchemaCompared( conf1: DBConf,
@@ -38,9 +39,12 @@ case class SchemaCompared( conf1: DBConf,
     callback(tableOfInfos(comparable))
   }
 
-
-
-
+  def setWhere( tableName: String, where: String) = {
+    comparePlans.foreach{ cp =>
+      if(cp.table.name == tableName)
+        cp.setWhere(Some(where))
+    }
+  }
 }
 
 object SchemaCompare {
@@ -60,7 +64,7 @@ object SchemaCompare {
   import scala.concurrent.{Await, Future}
 
   def fetchTableNames(ds: DataSource, schema: String) = {
-    try{
+    Try {
       val conn = ds.getConnection
       try{
         val meta = conn.getMetaData
@@ -69,7 +73,7 @@ object SchemaCompare {
       } finally {
         conn.close()
       }
-    }
+    }.toOption.getOrElse(List.empty)
   }
 
   def fetchSchema(ds: DataSource, schema: String, tableNames: Seq[String], callback: String => Unit, parallelism: Int = 4)
@@ -146,7 +150,7 @@ object SchemaCompare {
 
   def compareSchemas(conf1: DBConf,
                      conf2: DBConf,
-                      schema1: Map[String, TableInfo],
+                     schema1: Map[String, TableInfo],
                      schema2: Map[String, TableInfo],
                      callback: String => Unit): SchemaCompared = {
 
@@ -175,7 +179,7 @@ object SchemaCompare {
 
     val comparable = identical.toList.sortBy(_.name)
     callback("make compare plan")
-    val comparePlans = comparable.map(c => ComparePlan.apply(c, false))
+    val comparePlans = comparable.map(c => ComparePlan.apply(c, None, false))
     SchemaCompared(
       conf1.withoutPass,
       conf2.withoutPass,
@@ -281,6 +285,19 @@ object SchemaCompared {
     val (hdr, rows) = headerAndRows(l)
     val str = table( hdr, rows )
     str.render
+  }
+
+  def selectTable(l: Seq[TableInfo])(implicit term: Terminal, screenSemaphore: ScreenSemaphore)
+  : Option[String] = {
+
+    if(l.isEmpty)
+      return None
+
+    val s = SingleBox.singleBox("select a table", l.map(_.name))
+      .run( clearOnStart=false, clearOnExit= false, terminal= Some(term))
+      .map(_.selectedItem)
+      .toOption
+    s
   }
 
   def selectTables(l: Seq[TableInfo])

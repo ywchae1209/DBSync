@@ -242,7 +242,9 @@ trait Terminal {
   def terminalWidth(): Int
 }
 
-sealed trait RuntimeError
+sealed trait RuntimeError {
+  def message: String
+}
 case class TerminalError(message: String, cause: Option[Throwable] = None) extends RuntimeError
 case class RenderError(message: String, cause: Option[Throwable] = None) extends RuntimeError
 case class InputError(message: String, cause: Option[Throwable] = None) extends RuntimeError

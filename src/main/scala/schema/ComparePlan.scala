@@ -1,6 +1,7 @@
 package schema
 
 import schema.ComparePlan.{CancelledException, cancelleableIt}
+import schema.SchemaCompared.rowElements
 import table._
 import tui.{Aborted, HasName, ReportMsg, TUITask}
 import tui.{Aborted, Finished, HasName, InProgress, ReportMsg, Stopped, TUITask, TaskStatus}
@@ -11,13 +12,33 @@ import java.time.LocalDateTime
 import javax.sql.DataSource
 
 case class ComparePlan( table: TableInfo, // TableInfo,
-                        sourceSql: String,
-                        targetSql: String,
+                        var sourceSql: String,
+                        var targetSql: String,
                         sourceReaders: List[CReader],
                         targetReaders: List[CReader],
                         compRow: CompRow,
+                        var mayWhere: Option[String],
                         useLOBHash: Boolean = false ) extends HasName { self =>
   val name: String = table.name
+
+  def display(show: String => Unit) = {
+
+    show("--------------------------------------------------")
+    show( rowElements(table).map(_.render).mkString(" "))
+    show("--------------------------------------------------")
+    show(
+      if(mayWhere.isEmpty) "1. sql: select".color(Color.BrightBlue).render
+      else                 "1. sql: select".color(Color.Yellow).render
+    )
+    show("   " + sourceSql)
+    show("2. sql: insert to target".color(Color.BrightBlue).render)
+    show("   " + insertSql)
+    show("3. sql: update to target".color(Color.BrightBlue).render)
+    show("   " + updateSql)
+    show("4. sql: delete from target".color(Color.BrightBlue).render)
+    show("   " + deleteSql)
+    show("")
+  }
 
   def toCompareApplyTask(s1: DataSource, s2: DataSource, mock: Boolean): TUITask = {
 
@@ -44,6 +65,13 @@ case class ComparePlan( table: TableInfo, // TableInfo,
         }
       }
     }
+  }
+
+  def setWhere(mayWhere: Option[String]) = {
+    val neo = ComparePlan.apply(table, mayWhere, false)
+    this.sourceSql = neo.sourceSql
+    this.targetSql = neo.targetSql
+    this.mayWhere = mayWhere
   }
 
   def toCompareToFile(s1: DataSource, s2: DataSource, path: String): TUITask = {
@@ -297,7 +325,7 @@ object ComparePlan {
     }
   }
 
-  def apply(table: TableInfo, useLOBHash: Boolean): ComparePlan = {
+  def apply(table: TableInfo, mayWhere: Option[String], useLOBHash: Boolean): ComparePlan = {
     val ctx = new BuildContext()
 
     // 1. 정렬 키(Sort Key)로 사용할 컬럼 명단 확정
@@ -337,7 +365,7 @@ object ComparePlan {
     }
 
     // 4. SQL 생성
-    val sql = buildSql(table, ctx.selectParts.toSeq, ctx.orderParts.toSeq)
+    val sql = buildSql(table, ctx.selectParts.toSeq, ctx.orderParts.toSeq, mayWhere)
 
     ComparePlan(
       table         = table,
@@ -345,7 +373,8 @@ object ComparePlan {
       targetSql     = sql,
       sourceReaders = ctx.readers.toList,
       targetReaders = ctx.readers.toList,
-      compRow       = CompRow(ctx.sortKeyPlans.toList, ctx.compColPlans.toList, ctx.compLobPlans.toList)
+      compRow       = CompRow(ctx.sortKeyPlans.toList, ctx.compColPlans.toList, ctx.compLobPlans.toList),
+      mayWhere      = mayWhere
     )
   }
 
@@ -376,11 +405,12 @@ object ComparePlan {
     }
   }
 
-  private def buildSql(table: TableInfo, selects: Seq[String], orders: Seq[String]): String = {
+  private def buildSql(table: TableInfo, selects: Seq[String], orders: Seq[String], mayWhere: Option[String]): String = {
     val fullTableName = table.schema.map(_ + ".").getOrElse("") + table.name
     val selectClause = selects.mkString(", ")
     val orderClause = if (orders.nonEmpty) s"ORDER BY ${orders.mkString(", ")}" else ""
-    s"SELECT $selectClause FROM $fullTableName $orderClause"
+    val whereClause = if(mayWhere.nonEmpty) s"WHERE ${mayWhere.mkString}" else ""
+    s"SELECT $selectClause FROM $fullTableName $whereClause $orderClause"
   }
 
   private def createCReader(c: ColInfo, idx: Int, suffix: String, jType: Int, isVirtual: Boolean): CReader = {

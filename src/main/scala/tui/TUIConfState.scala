@@ -50,6 +50,11 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
   private def notLoaded
   = show(bullet + "configuration not loaded. use: " + "init | load".color(Color.Green).render)
 
+
+  def setWhere(tableName: String, where: String) = {
+    Compared.foreach(c => c.setWhere(tableName, where))
+  }
+
   def updateConSetting(kind: String, isA: Boolean) {
 
     val c = if(isA) dbconf1 else dbconf2
@@ -269,7 +274,7 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
           show(bullet + s"current plan name is ${pname.get}")
           cp.show_l(show)
       }
-    }
+    }.toEither.left.foreach(e => show(bullet + s"fail to load : ${e.getMessage}"))
   }
 
   def updateCount() {
@@ -322,7 +327,10 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
   }
 
   def selectPlans(): Seq[ComparePlan] = selectPlansOr.getOrElse(Seq.empty)
-
+  def selectPlan(): Option[ComparePlan] = comparePlanOr.flatMap{ o =>
+    val tn = selectTable(o.comparable)
+    tn.flatMap( n => o.comparePlans.find( p => p.name == n) )
+  }
   def selectPlans0(o: SchemaCompared): Seq[ComparePlan] = {
     val ts = selectTables(o.comparable)
     o.comparePlans.filter(p => ts.exists( _.name == p.table.name) )
@@ -347,22 +355,9 @@ case class TUIConfState( show: String => Unit, inst: RuntimeShellInstance)(impli
   def dataSourcesOr = tuiCon.dataSourcesOr
   // --------------------------------------------------------------------------------
 
-  private def showPlan(o: SchemaCompared) = {
+  private def showAllPlan(o: SchemaCompared) = {
     val selected = selectPlans0(o)
-    selected.foreach(p => {
-      show("--------------------------------------------------")
-      show( rowElements(p.table).map(_.render).mkString(" "))
-      show("--------------------------------------------------")
-      show("1. sql: select".color(Color.Red).render)
-      show("   " + p.sourceSql)
-      show("2. sql: insert to target".color(Color.Red).render)
-      show("   " + p.insertSql)
-      show("3. sql: update to target".color(Color.Red).render)
-      show("   " + p.updateSql)
-      show("4. sql: delete from target".color(Color.Red).render)
-      show("   " + p.deleteSql)
-      show("")
-    })
+    selected.foreach(p => p.display(show) )
   }
 
   private def withCompared( f: SchemaCompared => Unit): Unit = tuiCon.withCompared(f)
@@ -388,7 +383,23 @@ case class TUIConfState( show: String => Unit, inst: RuntimeShellInstance)(impli
   def show_d     = withCompared(o => detail(o.comparable))
   def show_dn    = withCompared(o => detail(o.filterNoKey))
   def show_dk    = withCompared(o => detail(o.filterKey))
-  def show_plan  = withCompared(o => showPlan(o))
+  def show_plan  = withCompared(o => showAllPlan(o))
+
+  // compare --------------------------------
+  def setWhere: Unit = {
+    val cp = tuiCon.selectPlan()
+    if(cp.isEmpty) return
+
+    val ti = cp.get
+    ti.display(show)
+    val where = "WHERE ".color(Color.Green).render
+    val in = InputPrompt.readLine(inst.term, bullet + where)
+    val ok = askConfirm(inst.term, where + in)
+    if(ok) {
+      tuiCon.setWhere(ti.name, in)
+      ti.display(show) // <<<< todo
+    }
+  }
 
   // compare --------------------------------
   def start_ps(n: Option[Int], debug: Boolean = false) {

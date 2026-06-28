@@ -225,6 +225,21 @@ object InputPrompt {
     asks.map{ case ((ask, prompt, pre), isSecret) => readNotEmpty(term, ask, prompt, pre, isSecret)}
   }
 
+  def readForStopOr(term: Terminal)
+  : Boolean = {
+    while(true) {
+      val input = term.readInput()
+      val key = KeyParser.parse(input, term)
+      key match {
+        case Key.Char('s') | Key.Char('S') |
+             Key.Char('q') | Key.Char('Q') | Key.Escape => return true
+        case Key.Char(_)                   => return false
+        case _ =>
+      }
+    }
+    false
+  }
+
   def readLine(term: Terminal,
                prompt: String,
                pre: Option[String] = None,
