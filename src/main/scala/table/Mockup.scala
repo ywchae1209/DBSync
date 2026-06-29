@@ -76,7 +76,7 @@ object Mockup {
     }
 
     override def getConnection: Connection = {
-      log("getConnection()"); null
+      log("getConnection() : not supported in Mock-up"); null    // todo
     }
 
     override def getFetchDirection: Int = {

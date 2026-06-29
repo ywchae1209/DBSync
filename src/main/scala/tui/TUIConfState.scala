@@ -8,7 +8,7 @@ import tui.TUIConfState.{dafaultConf1, defaultConf2}
 import tui.layoutzEx.InputPrompt.{askConfirm, readLineSeq, readNotEmpty}
 import tui.layoutzEx.JPromptShell.RuntimeShellInstance
 import tui.layoutzEx._
-import utils.LogHelper.{extractBetween, getFileList}
+import utils.LogHelper.getFileList
 import zio.json.{DecoderOps, EncoderOps}
 
 import java.nio.charset.StandardCharsets
@@ -42,7 +42,6 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
   implicit val ioterm: Option[Terminal] = Some(inst.term)
   implicit val iterm: Terminal = inst.term
 
-  private var planConf: String = "plan_temp.conf"
   private var dbconf1: Option[DBConf] = Some(dafaultConf1)
   private var dbconf2: Option[DBConf] = Some(defaultConf2)
   private var Compared: Option[SchemaCompared] = None
@@ -50,6 +49,7 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
   private def notLoaded
   = show(bullet + "configuration not loaded. use: " + "init | load".color(Color.Green).render)
 
+  def connected: Boolean = dbconf1.exists( _.connected) && dbconf2.exists( _.connected)
 
   def setWhere(tableName: String, where: String) = {
     Compared.foreach(c => c.setWhere(tableName, where))
@@ -219,62 +219,104 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
     }
   }
 
-  def save() {
+  def save(path: String, pname: Option[String]): Boolean = {
 
     val planOr = comparePlanOr
-    if(planOr.isEmpty) return
+    if(planOr.isEmpty)
+      return false
 
-    val pname = readNotEmpty( inst.term, "", "? plan name(use as legal filename) ? ".color(Color.Red).render, Some("wow"), false)
-    val fpath = s"plan_$pname.conf"
+    val pn = pname.getOrElse(
+      readNotEmpty( inst.term, "", "? conf name(use as legal filename) ? ".color(Color.Green).render, Some("myConf"), false)
+    )
+    val fname = s"plan_$pn.conf"
 
-    Try {
-      val p = Paths.get(fpath)
-      if (Files.exists(p)) throw new IllegalArgumentException(s"$fpath already exist.")
+    val out = Try {
+      val p = Paths.get(path).resolve(fname)
+      if (Files.exists(p)) throw new IllegalArgumentException(s"$fname already exist.")
       val j = planOr.get.toJsonPretty
       val b = j.getBytes(StandardCharsets.UTF_8)
       Files.write(p, b)
-      planConf = fpath
-      show(bullet + s"your plan is written to $fpath")
-      show(bullet + s"current plan name is $pname")
+      show(bullet + s"conf is written to ${fname.color(Color.Green).render}")
     }.toEither
-      .left.foreach(e => show(bullet + s"failed to save($fpath) ".color(Color.Red).render + e.toString) )
+
+    out.left.foreach(e => show(bullet + s"failed to save($fname) ".color(Color.Red).render + e.toString) )
+    out.isRight
   }
 
-  def load() {
+  def load0(path: String, pname: Option[String]): Option[SchemaCompared] = {
 
-    val list = getFileList("plan_", ".conf").fold(
+    val list = getFileList("plan_", ".conf", path).fold(
       e => { show(bullet + s"fail to locate plan conf: ${e.toString}"); List.empty},
       r => r
     )
 
-    val pname = SingleBox
-      .singleBox("select plan", list)
-      .run( clearOnStart= false, clearOnExit= false, terminal= Some(inst.term))
-      .fold(
-        e => {show(bullet + s"fail to select : ${e.toString}"); None},
-        r => extractBetween(r.selectedItem, "plan_", ".conf"))
+    val pn = pname.map(n => s"plan_$n.conf" ).orElse(
+      SingleBox
+        .singleBox("select plan", list)
+        .run( clearOnStart= false, clearOnExit= false, terminal= Some(inst.term))
+        .fold(
+          e => {show(bullet + s"fail to select : ${e.toString}"); None},
+          r => Some(r.selectedItem))
+    )
 
-    if (pname.isEmpty) return
+    if (pn.isEmpty)
+      return None
 
-    Try {
-      val fpath = s"plan_${pname.get}.conf"
-      val p = Paths.get(fpath)
+    val out = Try {
+      val fname = pn.get
+      val p = Paths.get(path).resolve(fname)
       val b = Files.readAllBytes(p)
       val s = new String(b, StandardCharsets.UTF_8)
       val o = s.fromJson[SchemaCompared]
+      val fstr = fname.color(Color.Green).render
       o match {
-        case Left(s) =>
-          show(bullet + s"cannot load conf. $fpath : $s")
+        case Left(e) =>
+          show(bullet + s"load fail. : $fstr : $e")
+          None
         case Right(cp) =>
-          planConf = fpath
+          show(bullet + s"load success. : $fstr")
+          Some(cp)
+      }
+    }.toOption.flatten
+    out
+  }
+
+  def setConfIfChanged(cp: SchemaCompared, ask: Boolean = false): Boolean = {
+
+    val co = "co".color(Color.Green).render
+    val in = "list in".color(Color.Green).render
+    def showChanged = show(bullet + "must re-connect before proceed(connection setting changed.). use " + co)
+
+    val changed = cp.conf1.neqUrlSchema(dbconf1) || cp.conf2.neqUrlSchema(dbconf2)
+
+    if(changed) {
+      if (ask) {
+        val ok = askConfirm(inst.term, bullet + "connection setting changed. proceed anyway.")
+        if (ok) {
+          showChanged
           Compared = Some(cp)
           dbconf1 = Some(cp.conf1)
           dbconf2 = Some(cp.conf2)
-          show(bullet + s"plan conf is loaded. : $fpath")
-          show(bullet + s"current plan name is ${pname.get}")
-          cp.show_l(show)
+          true
+        } else
+          false
+      } else {
+        showChanged
+        Compared = Some(cp)
+        dbconf1 = Some(cp.conf1)
+        dbconf2 = Some(cp.conf2)
+        true
       }
-    }.toEither.left.foreach(e => show(bullet + s"fail to load : ${e.getMessage}"))
+    } else {
+      Compared = Some(cp)
+      true
+    }
+  }
+
+  def load(path: String, pname: Option[String]): Boolean = {
+    val sc = load0(path, pname)
+    sc.foreach{ cp => setConfIfChanged(cp) }
+    sc.isDefined
   }
 
   def updateCount() {
@@ -349,9 +391,16 @@ case class TUIConfState( show: String => Unit, inst: RuntimeShellInstance)(impli
 
   def updateConSetting(kind: String, isA: Boolean) = tuiCon.updateConSetting(kind, isA)
   def connect() = tuiCon.connect()
+  def connected = {
+    val out = tuiCon.connected
+    if(!out) show(bullet + "not connected. see " + "co".color(Color.Green).render)
+    out
+  }
   def updateCount() = tuiCon.updateCount()
-  def save() = tuiCon.save()
-  def load() = tuiCon.load()
+  def setConfIfChanged(sc: SchemaCompared, ask: Boolean) = tuiCon.setConfIfChanged(sc, ask)
+  def save(path: String = ".", pname: Option[String] = None) = tuiCon.save(path, pname)
+  def load(path: String = ".", pname: Option[String] = None) = tuiCon.load(path, pname)
+  def load0(path: String = ".", pname: Option[String] = None): Option[SchemaCompared] = tuiCon.load0(path, pname)
   def dataSourcesOr = tuiCon.dataSourcesOr
   // --------------------------------------------------------------------------------
 
@@ -394,10 +443,10 @@ case class TUIConfState( show: String => Unit, inst: RuntimeShellInstance)(impli
     ti.display(show)
     val where = "WHERE ".color(Color.Green).render
     val in = InputPrompt.readLine(inst.term, bullet + where)
-    val ok = askConfirm(inst.term, where + in)
+    val ok = askConfirm(inst.term, where + in + "\n")
     if(ok) {
       tuiCon.setWhere(ti.name, in)
-      ti.display(show) // <<<< todo
+      ti.display(show)    // <<<< todo
     }
   }
 
@@ -421,10 +470,10 @@ case class TUIConfState( show: String => Unit, inst: RuntimeShellInstance)(impli
   }
 
   // compare & apply ------------------------
-  def start_pa(n: Option[Int], compDebug: Boolean = false, toMock: Boolean = false) {
+  def start_pa(n: Option[Int], compDebug: Boolean = false, mock: Boolean = false) {
     dataSourcesOr.foreach { case (ds1, ds2) =>
       val selected = tuiCon.selectPlans()
-      if( !toMock) {
+      if( !mock) {
         val confirm = askConfirm(inst.term, bullet + "Comparison results may be applied to target.")
         if(!confirm)
           return
@@ -440,7 +489,7 @@ case class TUIConfState( show: String => Unit, inst: RuntimeShellInstance)(impli
           notice = _ => (),
           verbose = true,
           compDebug = compDebug,
-          applDebug = toMock)
+          applDebug = mock)
       }
     }
   }

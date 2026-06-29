@@ -100,7 +100,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
     }
   }
 
-  def toApplyFromFile(s2: DataSource, path: String): TUITask = {
+  def toApplyFromFile(s2: DataSource, path: String, mock: Boolean, debug: Boolean = false): TUITask = {
 
     import DiffRowSerDe.readDiffRows
 
@@ -108,15 +108,15 @@ case class ComparePlan( table: TableInfo, // TableInfo,
       override def go(cancel: () => Boolean, notice: ReportMsg => Unit): Unit = {
 
         val reportAp = makeReportAp(notice, false)
-        val con = s2.getConnection
+        val con = if(mock) new Mockup.LoggingConnection else s2.getConnection
         try{
           val it0 = readDiffRows(name, path, cancel, notice)
           val done = it0.map( it =>
-            TableComparer.applyChanges( self, it, con, reportAp, debug= false)
+            TableComparer.applyChanges( self, it, con, reportAp, debug= debug)
           )
           done match {
-            case Left(e) => notice(ReportMsg(name, s"[Write Abort] ${e.getMessage}", Aborted))
-            case Right(l) => notice(ReportMsg(name, s"[Write Done] diff.total = $l", Finished))
+            case Left(e) => //notice(ReportMsg(name, s"[Apply Abort] ${e.getMessage}", Aborted))
+            case Right(_) => //notice(ReportMsg(name, s"[Apply Done] diff.total = $l", Finished))
           }
         } finally {
           con.close()

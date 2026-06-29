@@ -200,7 +200,7 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
     while (diff == 0 && it.hasNext) {
       val (comp, colA, colB) = it.next()
       diff = comp.compare(srcRow(colA - 1), tgtRow(colB - 1))
-//      if (diff != 0) println("diff: " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))
+      if (diff != 0) memo("diff: " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))  // <<<<< todo : temp.
     }
     diff
   }
@@ -210,6 +210,7 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
     while (colIt.hasNext) {
       val (comp, colA, colB) = colIt.next()
       if (!comp.equal(srcRow(colA - 1), tgtRow(colB - 1))) {
+        memo("diff: " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))  // <<<<< todo : temp.
         return false
       }
     }
@@ -218,6 +219,7 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
     while (lobIt.hasNext) {
       val (comp, colA, colB) = lobIt.next()
       if (!comp.equal(srcRow(colA - 1), tgtRow(colB - 1))) {
+        memo("diff: " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))  // <<<<< todo : temp.
         return false
       }
     }

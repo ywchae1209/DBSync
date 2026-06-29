@@ -7,6 +7,16 @@ import zio.json.{DeriveJsonCodec, JsonCodec}
 
 case class DBConf(url: String, user: String, schema: String, pass: Option[String] = None) {
 
+  def neqUrlSchema(o: Option[DBConf]) =
+  {
+    o match {
+      case None => true
+      case Some(other) =>
+        val out = (url != other.url) || (schema != other.schema)
+        out
+    }
+  }
+
   private var ds: Option[HikariDataSource] = None
 
   def withoutPass = copy(pass = None)
@@ -21,6 +31,8 @@ case class DBConf(url: String, user: String, schema: String, pass: Option[String
     ds = out
     ds.isDefined
   }
+
+  def connected = ds.nonEmpty
 
   def dataSourceOr(kind: String, callback: String => Unit) = {
     if(ds.isEmpty) callback( bullet + s"connection pool not initialized($kind).")
@@ -43,7 +55,7 @@ case class DBConf(url: String, user: String, schema: String, pass: Option[String
   def passIsNotSet(kind: String, callback: String => Unit) = {
     pass match {
       case Some(_) => true
-      case None    => callback(bullet + s"password is not set($kind).")
+      case None    => callback(bullet + s"password is not set($kind). see " + "so ta".color(Color.Green))
         false
     }
   }

@@ -155,11 +155,11 @@ object CValComp {
       val x = aOrd(i)
       val y = bOrd(i)
 
-      if (x != y) {
+//      if (x != y) {
         val diff = Math.abs(x - y)
         val tol = Math.max(absTol, relTol * Math.max(Math.abs(x), Math.abs(y)))
         if (diff > tol) return false
-      }
+//      }
       i += 1
     }
     true
