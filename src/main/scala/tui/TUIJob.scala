@@ -104,7 +104,7 @@ case class RunningTasks(
                          state: Ref[RunningTasksState],
                          show: String => Unit,
                          report: ReportMsg => Unit
-                       ) {
+                       )(implicit rt: Runtime[Any]) {
 
   // taskQue --> workerLoop --> runningState
   private val runningState: JobTUIBarStates = JobTUIBarStates(report)
@@ -117,14 +117,14 @@ case class RunningTasks(
     } yield Snapshot(s, p, r, runningState.currentState())
 
 
-  def stateIs(f: RunningTasksState => Boolean, onError: Boolean)(implicit rt: Runtime[Any]): Boolean = {
+  def stateIs(f: RunningTasksState => Boolean, onError: Boolean): Boolean = {
     Unsafe.unsafe { implicit u =>
       rt.unsafe.run(
           state.get.map(f)
         ).toEither
         .fold(
           e => {
-            show(bullet + s"fail to check tasks-state. try later. ($e.getMessage})")
+            show(bullet + s"fail to check tasks-state. try later. (${e.getMessage})")
             onError
           },
           r =>  r
@@ -132,7 +132,7 @@ case class RunningTasks(
     }
   }
 
-  def getSnapshot(implicit rt: Runtime[Any]): Option[Snapshot] = {
+  def getSnapshot: Option[Snapshot] = {
     Unsafe.unsafe{ implicit u =>
       rt.unsafe.run(snapshot).toEither.fold(
         e => {
@@ -157,7 +157,7 @@ case class RunningTasks(
       left   <- pendingCount.updateAndGet(_ - 1)
       accept <- accepting.get
       _      <- ZIO.when(left == 0 && !accept) {
-        ( ZIO.succeed(show(bullet + s"all planned tasks finished. use " + "jd".color(Color.Green).render + " to see result")) *>
+        ( ZIO.succeed(show(bullet + s"all planned tasks finished. use " + "jd".green + " to see result")) *>
           shutdownQueueOnce *>
           state.set(RunningTasksState.Finished) ).unit
       }
@@ -264,19 +264,19 @@ case object SM_select extends StopMode
 
 case class TUIJob[A<:HasName]( show: String => Unit,
                                inst: RuntimeShellInstance, // ,makeTask: A => TUITask
-                               name : String = "myJob"
-                             ) {
+                               name : String = "myJob",
+                             )( implicit zioRuntime: Runtime[Any]) {
 
   private val plans: mutable.Map[String, A] = mutable.Map.empty
   private var currentJob: Option[RunningTasks] = None
 
-  def isRunning(implicit rt: Runtime[Any]):Boolean
+  def isRunning: Boolean
   = currentJob.isDefined && currentJob.exists(_.stateIs(_.isRunning, false) )
 
-  def isDone(implicit rt: Runtime[Any]):Boolean
+  def isDone:Boolean
   = currentJob.isDefined && currentJob.exists(_.stateIs(_.isFinished, false ))
 
-  def getSnapshot(implicit rt: Runtime[Any]): Option[Snapshot] = currentJob.flatMap(_.getSnapshot)
+  def getSnapshot: Option[Snapshot] = currentJob.flatMap(_.getSnapshot)
 
   private def start(f: A=> TUITask, threadCount: Int = 2): ZIO[Any, Any, Option[RunningTasks]]
   = currentJob match {
@@ -303,7 +303,7 @@ case class TUIJob[A<:HasName]( show: String => Unit,
           queueClosed = closed,
           show = show,
           state = state,
-          report = _ => ())   // show(s"[$name] $msg") )
+          report = _ => ())   // show(s"[$name] $msg") )  // todo ::: <<<<< g3nie
         _ <- ZIO.succeed { currentJob = Some(manager) }
         _ <- ZIO.foreachDiscard(plans.values) { p => manager.offer(f(p)) }
         _ <- manager.finishOffer
@@ -313,17 +313,17 @@ case class TUIJob[A<:HasName]( show: String => Unit,
 
   import zio.{Runtime, Unsafe, _}
 
-  def startAsync(f: A => TUITask, runtime: Runtime[Any], threadCount: Int = 2): Option[RunningTasks] = {
+  def startAsync(f: A => TUITask, threadCount: Int = 2): Option[RunningTasks] = {
     Unsafe.unsafe { implicit u =>
-      runtime.unsafe.run {
+      zioRuntime.unsafe.run {
         start(f, threadCount)
       }.getOrThrowFiberFailure()
     }
   }
 
-  def stopAsync(runtime: Runtime[Any], mode: StopMode, name: String = ""): Unit = {
+  def stopAsync(mode: StopMode, name: String = ""): Unit = {
     Unsafe.unsafe { implicit u =>
-      runtime.unsafe.run {
+      zioRuntime.unsafe.run {
         stop(mode, name)
       }.getOrThrowFiberFailure()
     }

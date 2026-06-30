@@ -1,10 +1,14 @@
 package utils
 
+import com.typesafe.scalalogging.Logger
+
 import java.nio.file.{Files, Paths}
 import scala.jdk.CollectionConverters.IteratorHasAsScala
 import scala.util.Try
 
 object LogHelper {
+
+  private val logger = Logger("DBSyncLog")
   // logging
   // ================================================================================
   // memo --> debug/trace level
@@ -14,10 +18,10 @@ object LogHelper {
   // --------------------------------------------------------------------------------
   private def showLog(s: => String) = System.err.println(s)
 
-  def memo(s: => String): Unit = { showLog("\t" + s) }
-  def note(s: => String): Unit = { showLog("@\t" + s) }
-  def mark(s: => String): Unit = { showLog("*\t" + s) }
-  def oops(s: => String): Unit = { showLog("!\t" + s) }
+  def memo(s: => String): Unit = { logger.info("\t" + s) }
+  def note(s: => String): Unit = { logger.info("@\t" + s) }
+  def mark(s: => String): Unit = { logger.warn("*\t" + s) }
+  def oops(s: => String): Unit = { logger.error("!\t" + s) }
 
   def memo(h: => String, s: => String): Unit = { memo( h + "\n" + s) }
   def note(h: => String, s: => String): Unit = { note( h + "\n" + s) }
@@ -106,7 +110,7 @@ object LogHelper {
   def maybe[A](lable: => String)(op: => A): Option[A] = {
     try Option(op) catch {
       case e: Throwable =>
-        mark(e.toString)
+        mark(e.getMessage)
         None
     }
   }
@@ -114,7 +118,7 @@ object LogHelper {
   def mayNot[A](lable: => String)(op: => A): Option[A] = {
     try Option(op) catch {
       case e: Throwable =>
-        oops(e.toString)
+        oops(e.getMessage)
         None
     }
   }

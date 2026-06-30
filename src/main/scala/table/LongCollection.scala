@@ -1,6 +1,6 @@
 package table
 
-import utils.LogHelper.{err, mark, memo, oops}
+import utils.LogHelper.{err, mark, note, oops}
 
 import java.io.{ByteArrayInputStream, Reader, SequenceInputStream, StringReader}
 import scala.jdk.CollectionConverters.IteratorHasAsJava
@@ -101,7 +101,7 @@ object LongCollection {
           }
         } catch {
           case e: Throwable =>
-            try is.close() catch { case e: Throwable => mark(e.toString)}
+            try is.close() catch { case e: Throwable => mark(e.getMessage)}
             throw err(e)
         }
 
@@ -262,7 +262,7 @@ object LongCollection {
     def size:Long = chunkData.map(_._2).sum
 
     def append(chunk: String): Unit = {
-      memo( s"[LongString] append $chunk")
+      note( s"[LongString] append $chunk")
       val len = chunk.length
       chunkData :+= (chunk -> len)
     }

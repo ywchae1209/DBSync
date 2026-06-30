@@ -1,5 +1,7 @@
 package table
 
+import schema.ComparePlan.jobLogger
+
 import java.io.{InputStream, Reader}
 import java.net.URL
 import java.sql._
@@ -11,7 +13,7 @@ object Mockup {
 
   class LoggingPreparedStatement extends PreparedStatement {
 
-    def log(msg: String): Unit = println(s"\t\t[Mock.Stmt] $msg")
+    def log(msg: String): Unit = jobLogger.info(s"\t\t[Mock.Stmt] $msg")
 
     override def addBatch(): Unit = log("addBatch()")
     override def addBatch(sql: String): Unit = log(s"addBatch(sql=$sql)")
@@ -76,7 +78,7 @@ object Mockup {
     }
 
     override def getConnection: Connection = {
-      log("getConnection() : not supported in Mock-up"); null    // todo
+      log("getConnection() : Not supported in Mock-up"); null    // todo
     }
 
     override def getFetchDirection: Int = {
@@ -278,7 +280,7 @@ object Mockup {
 
   class LoggingConnection extends Connection {
 
-    def log(msg: String): Unit = println(s"\t\t[Mock.Conn] $msg")
+    def log(msg: String): Unit = jobLogger.info(s"\t\t[Mock.Conn] $msg")
 
     private val stmt = new LoggingPreparedStatement
 

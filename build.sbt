@@ -1,6 +1,6 @@
 import scala.collection.Seq
 
-ThisBuild / version := "0.9.5"
+ThisBuild / version := "0.9.6"
 
 ThisBuild / scalaVersion := "2.13.18"
 
@@ -62,13 +62,21 @@ libraryDependencies += "com.oracle.database.spatial" % "sdoutl" % "23.26"
 libraryDependencies += "com.oracle.database.spatial" % "sdoapi" % "23.26"
 
 // mysql
-libraryDependencies += "com.mysql" % "mysql-connector-j" % "9.3.0"
+//libraryDependencies += "com.mysql" % "mysql-connector-j" % "9.3.0"
 
 // postgreSql
 //libraryDependencies += "org.postgresql" % "postgresql" % "42.7.7"
 
 // no-logging
-libraryDependencies += "org.slf4j" % "slf4j-nop" % "2.0.12"
+//libraryDependencies += "org.slf4j" % "slf4j-nop" % "2.0.12"
+// logging
+libraryDependencies ++= Seq(
+  "org.slf4j" % "slf4j-api" % "2.0.18",
+  "org.apache.logging.log4j" % "log4j-api" % "2.23.1",
+  "org.apache.logging.log4j" % "log4j-core" % "2.23.1",
+  "org.apache.logging.log4j" % "log4j-slf4j2-impl" % "2.23.1", // SLF4J → Log4j2 연결
+  "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5"
+)
 
 // zio json
 libraryDependencies += "dev.zio" %% "zio-json" % "0.9.2"

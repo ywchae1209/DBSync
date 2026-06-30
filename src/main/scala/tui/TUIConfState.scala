@@ -37,7 +37,7 @@ object TUIConfState {
   )
 }
 
-case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(implicit sema: ScreenSemaphore) {
+case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(implicit sema: ScreenSemaphore){
 
   implicit val ioterm: Option[Terminal] = Some(inst.term)
   implicit val iterm: Terminal = inst.term
@@ -47,7 +47,7 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
   private var Compared: Option[SchemaCompared] = None
 
   private def notLoaded
-  = show(bullet + "configuration not loaded. use: " + "init | load".color(Color.Green).render)
+  = show(bullet + "configuration not loaded. use: " + "init | load".green)
 
   def connected: Boolean = dbconf1.exists( _.connected) && dbconf2.exists( _.connected)
 
@@ -60,10 +60,10 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
     val c = if(isA) dbconf1 else dbconf2
     val in = readLineSeq(inst.term, Seq(
       (s"DB connect setting ($kind)",
-        " url     ? ".color(Color.Green).render, c.map(_.url)) -> false,
-      ("", " schema  ? ".color(Color.Green).render, c.map(_.schema)) -> false,
-      ("", " id      ? ".color(Color.Green).render, c.map(_.user)) -> false,
-      ("", " pwd     ? ".color(Color.Green).render, c.map(_.pass.mkString)) -> true,
+        " url     ? ".green, c.map(_.url)) -> false,
+      ("", " schema  ? ".green, c.map(_.schema)) -> false,
+      ("", " id      ? ".green, c.map(_.user)) -> false,
+      ("", " pwd     ? ".green, c.map(_.pass.mkString)) -> true,
     ))
 
     val conf = DBConf.apply(url= in(0), schema= in(1), user = in(2), pass= in(3))
@@ -129,7 +129,7 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
         return
     }
 
-    val js = JobSpinner.jobSpinner[Boolean]("connect".color(Color.Green).render)
+    val js = JobSpinner.jobSpinner[Boolean]("connect".green)
     Future {
       js.setMessage("connection pool for source..")
       val ok1= conf1.initDataSource("source", s => js.setMessage( "(S) " + s))
@@ -148,7 +148,7 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
 
     js.run(clearOnStart= false, clearOnExit = false, terminal= ioterm)
       .fold(
-        e => {show( bullet + s"fail to connect : ${e.toString}"); false},
+        e => {show( bullet + s"fail to connect : ${e.getMessage}"); false},
         r => r.getOr.getOrElse(false))
   }
 
@@ -186,7 +186,7 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
     val cf2 = confOr(isA = false).get
 
 
-    val js = JobSpinner.jobSpinner[SchemaCompared]("init".color(Color.Green).render)
+    val js = JobSpinner.jobSpinner[SchemaCompared]("init".green)
     val (ns1, ns2) = selectTableNames( ds1, cf1.schema, ds2, cf2.schema, all)
 
     val start: Long = java.lang.System.currentTimeMillis()
@@ -200,7 +200,7 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
     val ret = js
       .run(clearOnStart= false, clearOnExit = false, terminal= ioterm)
       .fold(
-        e => {show(bullet + "fail to init : " + e.toString ); None},
+        e => {show(bullet + "fail to init : " + e.getMessage ); None},
         r => r.getOr
       )
 
@@ -226,7 +226,7 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
       return false
 
     val pn = pname.getOrElse(
-      readNotEmpty( inst.term, "", "? conf name(use as legal filename) ? ".color(Color.Green).render, Some("myConf"), false)
+      readNotEmpty( inst.term, "", "? conf name(use as legal filename) ? ".green, Some("myConf"), false)
     )
     val fname = s"plan_$pn.conf"
 
@@ -236,17 +236,17 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
       val j = planOr.get.toJsonPretty
       val b = j.getBytes(StandardCharsets.UTF_8)
       Files.write(p, b)
-      show(bullet + s"conf is written to ${fname.color(Color.Green).render}")
+      show(bullet + s"conf is written to ${fname.green}")
     }.toEither
 
-    out.left.foreach(e => show(bullet + s"failed to save($fname) ".color(Color.Red).render + e.toString) )
+    out.left.foreach(e => show(bullet + s"fail to save($fname) ".red + e.getMessage) )
     out.isRight
   }
 
   def load0(path: String, pname: Option[String]): Option[SchemaCompared] = {
 
     val list = getFileList("plan_", ".conf", path).fold(
-      e => { show(bullet + s"fail to locate plan conf: ${e.toString}"); List.empty},
+      e => { show(bullet + s"fail to locate plan conf: ${e.getMessage}"); List.empty},
       r => r
     )
 
@@ -255,7 +255,7 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
         .singleBox("select plan", list)
         .run( clearOnStart= false, clearOnExit= false, terminal= Some(inst.term))
         .fold(
-          e => {show(bullet + s"fail to select : ${e.toString}"); None},
+          e => {show(bullet + s"fail to select : ${e.getMessage}"); None},
           r => Some(r.selectedItem))
     )
 
@@ -268,7 +268,7 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
       val b = Files.readAllBytes(p)
       val s = new String(b, StandardCharsets.UTF_8)
       val o = s.fromJson[SchemaCompared]
-      val fstr = fname.color(Color.Green).render
+      val fstr = fname.green
       o match {
         case Left(e) =>
           show(bullet + s"load fail. : $fstr : $e")
@@ -283,8 +283,8 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
 
   def setConfIfChanged(cp: SchemaCompared, ask: Boolean = false): Boolean = {
 
-    val co = "co".color(Color.Green).render
-    val in = "list in".color(Color.Green).render
+    val co = "co".green
+    val in = "list in".green
     def showChanged = show(bullet + "must re-connect before proceed(connection setting changed.). use " + co)
 
     val changed = cp.conf1.neqUrlSchema(dbconf1) || cp.conf2.neqUrlSchema(dbconf2)
@@ -332,7 +332,7 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
     if(isEmpty(cs)) return
 
     val selected = selectTables(cs)
-    val js = JobSpinner.jobSpinner[Seq[TableInfo]](s"fetch count of ${selected.size} tables".color(Color.Cyan).render)
+    val js = JobSpinner.jobSpinner[Seq[TableInfo]](s"fetch count of ${selected.size} tables".cyan)
 
     Future{
       js.setMessage("start")
@@ -380,9 +380,10 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
 
 }
 
-case class TUIConfState( show: String => Unit, inst: RuntimeShellInstance)(implicit sema: ScreenSemaphore) {
+case class TUIConfState( show: String => Unit, display: String => Unit, inst: RuntimeShellInstance)(implicit sema: ScreenSemaphore) {
 
   val tuiCon = TUIConnection(show, inst)
+  def showRM(rm: ReportMsg) = { display(rm.statusString) }
 
   // --------------------------------------------------------------------------------
   def selectPlansNotIn(names: Set[String]): Seq[ComparePlan] = tuiCon.selectPlansNotIn(names)
@@ -393,7 +394,7 @@ case class TUIConfState( show: String => Unit, inst: RuntimeShellInstance)(impli
   def connect() = tuiCon.connect()
   def connected = {
     val out = tuiCon.connected
-    if(!out) show(bullet + "not connected. see " + "co".color(Color.Green).render)
+    if(!out) show(bullet + "not connected. see " + "co".green)
     out
   }
   def updateCount() = tuiCon.updateCount()
@@ -441,7 +442,7 @@ case class TUIConfState( show: String => Unit, inst: RuntimeShellInstance)(impli
 
     val ti = cp.get
     ti.display(show)
-    val where = "WHERE ".color(Color.Green).render
+    val where = "WHERE ".green
     val in = InputPrompt.readLine(inst.term, bullet + where)
     val ok = askConfirm(inst.term, where + in + "\n")
     if(ok) {
@@ -453,6 +454,7 @@ case class TUIConfState( show: String => Unit, inst: RuntimeShellInstance)(impli
   // compare --------------------------------
   def start_ps(n: Option[Int], debug: Boolean = false) {
 
+    n.foreach( i => show(bullet + s"- process first ${i.toString.yellow} entries."))
     dataSourcesOr.foreach { case (ds1, ds2) =>
       val selected = tuiCon.selectPlans()
       for (p <- selected) {
@@ -462,15 +464,17 @@ case class TUIConfState( show: String => Unit, inst: RuntimeShellInstance)(impli
           s2 = ds2,
           limit = n,
           cancel = () => false,
-          notice = _ => (),
-          verbose = true,
+          notice = showRM,
           compDebug = debug)
       }
     }
   }
 
   // compare & apply ------------------------
-  def start_pa(n: Option[Int], compDebug: Boolean = false, mock: Boolean = false) {
+  def start_pa(n: Option[Int], compDebug: Boolean = false, applDebug: Boolean = false , mock: Boolean = false) {
+
+    n.foreach( i => show(bullet + s"- process first ${i.toString.yellow} entries."))
+
     dataSourcesOr.foreach { case (ds1, ds2) =>
       val selected = tuiCon.selectPlans()
       if( !mock) {
@@ -486,10 +490,9 @@ case class TUIConfState( show: String => Unit, inst: RuntimeShellInstance)(impli
           s2 = ds2,
           limit = n,
           cancel = () => false,
-          notice = _ => (),
-          verbose = true,
+          notice = showRM,
           compDebug = compDebug,
-          applDebug = mock)
+          applDebug = applDebug)
       }
     }
   }

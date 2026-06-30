@@ -1,6 +1,7 @@
 package schema
 
-import schema.ComparePlan.{CancelledException, cancelleableIt}
+import com.typesafe.scalalogging.Logger
+import schema.ComparePlan.{CancelledException, cancelleableIt, jobLogger}
 import schema.SchemaCompared.rowElements
 import table._
 import tui.{Aborted, HasName, ReportMsg, TUITask}
@@ -21,23 +22,27 @@ case class ComparePlan( table: TableInfo, // TableInfo,
                         useLOBHash: Boolean = false ) extends HasName { self =>
   val name: String = table.name
 
-  def display(show: String => Unit) = {
+  def display(callback: String => Unit) = {
+    val output =
+      Seq(
+        "--------------------------------------------------",
+        rowElements(table).map(_.render).mkString(" "),
+        "--------------------------------------------------",
+        if (mayWhere.isEmpty)
+          "1. sql: select".color(Color.BrightBlue).render
+        else
+          "1. sql: select".color(Color.Yellow).render,
+        "   " + sourceSql,
+        "2. sql: insert to target".color(Color.BrightBlue).render,
+        "   " + insertSql,
+        "3. sql: update to target".color(Color.BrightBlue).render,
+        "   " + updateSql,
+        "4. sql: delete from target".color(Color.BrightBlue).render,
+        "   " + deleteSql,
+        ""
+      ).mkString("\n")
 
-    show("--------------------------------------------------")
-    show( rowElements(table).map(_.render).mkString(" "))
-    show("--------------------------------------------------")
-    show(
-      if(mayWhere.isEmpty) "1. sql: select".color(Color.BrightBlue).render
-      else                 "1. sql: select".color(Color.Yellow).render
-    )
-    show("   " + sourceSql)
-    show("2. sql: insert to target".color(Color.BrightBlue).render)
-    show("   " + insertSql)
-    show("3. sql: update to target".color(Color.BrightBlue).render)
-    show("   " + updateSql)
-    show("4. sql: delete from target".color(Color.BrightBlue).render)
-    show("   " + deleteSql)
-    show("")
+    callback(output)
   }
 
   def toCompareApplyTask(s1: DataSource, s2: DataSource, mock: Boolean): TUITask = {
@@ -45,8 +50,8 @@ case class ComparePlan( table: TableInfo, // TableInfo,
     new TUITask(name) {
       override def go(cancel: () => Boolean, notice: ReportMsg => Unit): Unit = {
 
-        val reportIt = makeReportIt(notice, false)
-        val reportAp = makeReportAp(notice, false)
+        val reportIt = makeReportIt(notice)
+        val reportAp = makeReportAp(notice)
         val comp = new TableComparer(self, false)
 
         val it0 = comp.compareIt(s1, s2, reportIt)
@@ -78,20 +83,20 @@ case class ComparePlan( table: TableInfo, // TableInfo,
 
     import DiffRowSerDe.writeDiffRows
 
-    new TUITask(name) {
+    new TUITask(table.name) {
       override def go(cancel: () => Boolean, notice: ReportMsg => Unit): Unit = {
 
-        val reportIt = makeReportIt(notice, false)
+        val reportIt = makeReportIt(notice)
         val comp = new TableComparer(self, false)
 
         val it0 = comp.compareIt(s1, s2, reportIt)
         val it = cancelleableIt(it0, cancel, None)
         val filtered = it.filterNot(_.isInstanceOf[Same])
         try{
-          val done = writeDiffRows(name, path, filtered, cancel, notice)
+          val done = writeDiffRows(table.name, path, filtered, cancel, notice)
           done match {
-            case Left(e) => notice(ReportMsg(name, s"[Write Abort] ${e.getMessage}", Aborted))
-            case Right(l) => notice(ReportMsg(name, s"[Write Done] diff.total = $l", Finished))
+            case Left(e) => notice(ReportMsg(table.name, s"[Write Abort] ${e.getMessage}", Aborted))
+            case Right(l) => notice(ReportMsg(table.name, s"[Write Done] diff.total = $l", Finished))
           }
         } finally {
           it0.close()
@@ -100,19 +105,19 @@ case class ComparePlan( table: TableInfo, // TableInfo,
     }
   }
 
-  def toApplyFromFile(s2: DataSource, path: String, mock: Boolean, debug: Boolean = false): TUITask = {
+  def toApplyFromFile(s2: DataSource, path: String, mock: Boolean, applDebug: Boolean = false): TUITask = {
 
     import DiffRowSerDe.readDiffRows
 
-    new TUITask(name) {
+    new TUITask(table.name) {
       override def go(cancel: () => Boolean, notice: ReportMsg => Unit): Unit = {
 
-        val reportAp = makeReportAp(notice, false)
+        val reportAp = makeReportAp(notice)
         val con = if(mock) new Mockup.LoggingConnection else s2.getConnection
         try{
-          val it0 = readDiffRows(name, path, cancel, notice)
+          val it0 = readDiffRows(table.name, path, cancel, notice)
           val done = it0.map( it =>
-            TableComparer.applyChanges( self, it, con, reportAp, debug= debug)
+            TableComparer.applyChanges( self, it, con, reportAp, debug= applDebug)
           )
           done match {
             case Left(e) => //notice(ReportMsg(name, s"[Apply Abort] ${e.getMessage}", Aborted))
@@ -126,7 +131,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
 
   }
 
-  def makeReportIt(notice: ReportMsg => Unit, verbose: Boolean)
+  def makeReportIt(notice: ReportMsg => Unit)
   =
     (r1:Long, r2:Long, s:Long, u:Long, a:Long, b:Long, m: String, fin: Boolean) => {
       val msg =
@@ -135,10 +140,10 @@ case class ComparePlan( table: TableInfo, // TableInfo,
 
       val rm = ReportMsg(name, msg, if (fin) Finished else InProgress)
       notice(rm)
-      if(verbose) println(rm.statusString)
+      jobLogger.info(rm.statusString)
     }
 
-  def makeReportAp(notice: ReportMsg => Unit, verbose: Boolean)
+  def makeReportAp(notice: ReportMsg => Unit)
   = (ic: Long, uc: Long, dc: Long, sc: Long, fin: Boolean) => {
     val msg =
       if(fin) (s"apply :  in:$ic up:$uc de:$dc sa:$sc".color(Color.Yellow).render)
@@ -146,7 +151,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
 
     val rm = ReportMsg(name, msg, if (fin) Finished else InProgress)
     notice(rm)
-    if(verbose) println(rm.statusString)
+    jobLogger.info(rm.statusString)
   }
 
 
@@ -154,11 +159,10 @@ case class ComparePlan( table: TableInfo, // TableInfo,
                 limit: Option[Int],
                 cancel: () => Boolean,
                 notice: ReportMsg => Unit,
-                verbose: Boolean= true,
                 compDebug: Boolean = false): Unit = {
 
     val reportIt: (Long, Long, Long, Long, Long, Long, String, Boolean) => Unit =
-      makeReportIt(notice, verbose)
+      makeReportIt(notice)
 
     val comp = new TableComparer(this, compDebug)
     val it0 = comp.compareIt(s1, s2, reportIt)
@@ -181,12 +185,11 @@ case class ComparePlan( table: TableInfo, // TableInfo,
                      limit: Option[Int],
                      cancel: () => Boolean,
                      notice: ReportMsg => Unit,
-                     verbose: Boolean= true,
                      compDebug: Boolean = false,
                      applDebug: Boolean = false) = {
 
-    val reportIt = makeReportIt(notice, verbose)
-    val reportAp = makeReportAp(notice, verbose)
+    val reportIt = makeReportIt(notice)
+    val reportAp = makeReportAp(notice)
 
     val comp = new TableComparer(this, compDebug)
     val it0 = comp.compareIt(s1, s2, reportIt)
@@ -229,6 +232,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
   val (insertSql, updateSql, deleteSql, keyIndices, valIndices) = TableComparer.sqlForApply(this)
 
 }
+
 // --------------------------------------------------------------------------------
 final case class CompLOB(name: String,
                          colA: Int,     // LOB Locator index
@@ -278,6 +282,7 @@ object CompRow {
 
 object ComparePlan {
 
+  val jobLogger = Logger("DBSyncJob")
   case class CancelledException(at: LocalDateTime) extends RuntimeException(s"cancelled at $at")
 
   def cancelleableIt[A](it: Iterator[A] with AutoCloseable,

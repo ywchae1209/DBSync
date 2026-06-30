@@ -243,11 +243,11 @@ trait Terminal {
 }
 
 sealed trait RuntimeError {
-  def message: String
+  def getMessage: String
 }
-case class TerminalError(message: String, cause: Option[Throwable] = None) extends RuntimeError
-case class RenderError(message: String, cause: Option[Throwable] = None) extends RuntimeError
-case class InputError(message: String, cause: Option[Throwable] = None) extends RuntimeError
+case class TerminalError(getMessage: String, cause: Option[Throwable] = None) extends RuntimeError
+case class RenderError(getMessage: String, cause: Option[Throwable] = None) extends RuntimeError
+case class InputError(getMessage: String, cause: Option[Throwable] = None) extends RuntimeError
 
 
 import org.jline.terminal.{TerminalBuilder, Terminal => JLineTerminal}

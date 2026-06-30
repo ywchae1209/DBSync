@@ -1,6 +1,7 @@
 package tui.layoutzEx
 
 import org.jline.utils.AttributedString
+import tui.SyncTUI.bullet
 
 import scala.collection.JavaConverters.seqAsJavaListConverter
 import scala.collection.concurrent.TrieMap
@@ -60,7 +61,7 @@ object JPromptShell {
     // --------------------------------------------------------------------------------
     @volatile var showStatus: Boolean = false
     private val lockS = new Object()
-    var barHeight: Int = 5
+    private var barHeight: Int = 5
 
     @volatile var barStates: Option[TUIBarStates] = None
     private val lockT = new Object()
@@ -77,7 +78,6 @@ object JPromptShell {
     // --------------------------------------------------------------------------------
 
     val term : Terminal
-    def setPrompt(s: String): Unit
     def runShell(): Unit
   }
 
@@ -85,31 +85,21 @@ object JPromptShell {
 
     def onStart(term: Terminal): Unit
     def onExit(term: Terminal): Unit
-
-    // finish IO loop
-    def handleIO( prompt: String, show: String => Unit, line: String, self: RuntimeShellInstance)
-    : Option[String]
-
+    def handleIO( prompt: String, line: String, self: RuntimeShellInstance): Unit
     def stopIOLoop() : Boolean
   }
 
-  def promptShell[A](jTermWrapper: JLineTerminalWrapper, prompt0: String)
-                    (shellApp: ShellHandler)(implicit semaphore: ScreenSemaphore) =
-    new RuntimeShellInstance {
+  def promptShell[A](jTermWrapper: JLineTerminalWrapper,
+                     prompt: String,
+                     shellApp: ShellHandler,
+                     semaphore: ScreenSemaphore)
+  = new RuntimeShellInstance {
 
-      val term = jTermWrapper
-
+      val term  = jTermWrapper
       val jterm = jTermWrapper.jTerm
       private val jStateBar = Status.getStatus(jterm, true)
 
-      @volatile var prompt = prompt0
-      @volatile var num = 0L
       @volatile private var shouldContinue = true
-
-      private val promptLock = new Object()
-
-      override def setPrompt(s: String): Unit = promptLock.synchronized{ prompt = s }
-      private def getPrompt: String = promptLock.synchronized{ prompt }
 
       override def runShell(): Unit = {
 
@@ -145,16 +135,15 @@ object JPromptShell {
 
       private def runIOLoop(self: RuntimeShellInstance) = {
         while(shouldContinue) {
-          val p0 = getPrompt
           val p1 = for {
-            l <- Try(InputPrompt.readLine(jTermWrapper, p0.color(Color.Yellow).render))
-            p <- Try(shellApp.handleIO(p0, show, l, self))
+            l <- Try(InputPrompt.readLine(jTermWrapper, prompt)(semaphore))
+            p <- Try(shellApp.handleIO(prompt, l, self))
           } yield p
 
           if(p1.isFailure) {
+            // todo :: g3nie -- logging
             shouldContinue = false
           } else {
-            p1.foreach( _.foreach (setPrompt))
             if(shellApp.stopIOLoop())
               shouldContinue = false
           }
@@ -162,13 +151,9 @@ object JPromptShell {
         }
       }
 
-      // todo ::
       def renderStateBar(): Boolean = {
         try{
           if( needShowStatusBar()) {
-//            num = (num + 1) % Int.MaxValue
-//            val temp = AttributedString.fromAnsi( " " + spinner(frame = num.toInt, style = SpinnerStyle.Moon).render )
-//            val ls = temp +: getBarStatesMsg
             val ls = getBarStatesMsg
             if(ls.isEmpty) jStateBar.hide() else {
               semaphore.loosely { () =>
@@ -183,7 +168,7 @@ object JPromptShell {
         }
         catch { case e: Throwable =>
           semaphore.loosely { () =>
-            jStateBar.update( e.toString.split("\\n").map( AttributedString.fromAnsi).toList.asJava )
+            jStateBar.update( e.getMessage.split("\\n").map( AttributedString.fromAnsi).toList.asJava )
           }
           false
         }

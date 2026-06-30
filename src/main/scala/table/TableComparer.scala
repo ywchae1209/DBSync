@@ -3,7 +3,7 @@ package table
 import oracle.jdbc.OracleConnection
 import schema.ComparePlan
 import tui.layoutzEx._
-import utils.LogHelper.{memo, oops}
+import utils.LogHelper.{memo, note, oops}
 
 import java.io.StringReader
 import java.sql.{Connection, PreparedStatement, ResultSet, Types}
@@ -41,7 +41,7 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
     }
     elapseLog()
 
-    def debugLog(s: => String) = if(isDebug) memo(s) // todo log-level
+    def debugLog(s: => String) = if(isDebug) memo(s)
 
     new Iterator[DiffRow] with AutoCloseable {
 
@@ -118,10 +118,10 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
         if (nextBuffer.isDefined) return true
 
         while (srcHasNext && tgtHasNext && nextBuffer.isEmpty) {
-          val keyDiff = compareKeys(curSrcRow, curTgtRow)
+          val keyDiff = compareKeys(curSrcRow, curTgtRow, isDebug)
 
           if (keyDiff == 0) {
-            if (!equalValues(curSrcRow, curTgtRow)) {
+            if (!equalValues(curSrcRow, curTgtRow, isDebug)) {
               updCount += 1
               nextBuffer = Some(Update( extractSourceKeys(curSrcRow), extractSourceVals(curSrcRow)))
             } else {
@@ -194,23 +194,25 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
   private val sortedSrcReaders = plan.sourceReaders.sortBy(_.index)
   private val sortedTgtReaders = plan.targetReaders.sortBy(_.index)
 
-  private def compareKeys(srcRow: IndexedSeq[CVal], tgtRow: IndexedSeq[CVal]): Int = {
+  private def compareKeys(srcRow: IndexedSeq[CVal], tgtRow: IndexedSeq[CVal], debug: Boolean): Int = {
     var diff = 0
     val it = keyComps.iterator
     while (diff == 0 && it.hasNext) {
       val (comp, colA, colB) = it.next()
       diff = comp.compare(srcRow(colA - 1), tgtRow(colB - 1))
-      if (diff != 0) memo("diff: " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))  // <<<<< todo : temp.
+      if (debug && (diff != 0))
+        note("diff: " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))
     }
     diff
   }
 
-  private def equalValues(srcRow: IndexedSeq[CVal], tgtRow: IndexedSeq[CVal]): Boolean = {
+  private def equalValues(srcRow: IndexedSeq[CVal], tgtRow: IndexedSeq[CVal], debug: Boolean): Boolean = {
     val colIt = colComps.iterator
     while (colIt.hasNext) {
       val (comp, colA, colB) = colIt.next()
-      if (!comp.equal(srcRow(colA - 1), tgtRow(colB - 1))) {
-        memo("diff: " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))  // <<<<< todo : temp.
+      val eq = comp.equal(srcRow(colA - 1), tgtRow(colB - 1))
+      if (debug && !eq) {
+        note("diff: " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))
         return false
       }
     }
@@ -218,8 +220,9 @@ class TableComparer(plan: ComparePlan, isDebug: Boolean = false) {
     val lobIt = lobComps.iterator
     while (lobIt.hasNext) {
       val (comp, colA, colB) = lobIt.next()
-      if (!comp.equal(srcRow(colA - 1), tgtRow(colB - 1))) {
-        memo("diff: " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))  // <<<<< todo : temp.
+      val eq = comp.equal(srcRow(colA - 1), tgtRow(colB - 1))
+      if (debug && !eq) {
+        note("diff: " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))
         return false
       }
     }
@@ -291,14 +294,6 @@ object TableComparer {
 
     (insertSql, updateSql, deleteSql, keyIndices, valIndices)
   }
-
-
-  def showApplyState(ic: Long, uc: Long, dc: Long, sc: Long, fin: Boolean)
-  = {
-    if(fin) println(s"apply :  in:$ic up:$uc de:$dc sa:$sc".color(Color.Yellow).render)
-    else    println(s"apply :  in:$ic up:$uc de:$dc sa:$sc")
-  }
-
 
   /** ------------------------------ */
   def applyChanges(plan: ComparePlan, diffs: Iterator[DiffRow], targetConn: Connection,
@@ -386,7 +381,8 @@ object TableComparer {
       case e: Exception =>
         notice(insCount, updCount, delCount, skiCount, true)
         targetConn.rollback()
-        oops("[Apply Target Stop]".color(Color.Red).render + s" last transaction rolled back. Reason: ${e.getMessage}")
+        // todo :: g3nie
+        oops("[Apply Target Stop]".color(Color.Red).render + s" ${plan.name} last transaction rolled back. Reason: ${e.getMessage}")
     } finally {
       insStmt.close()
       updStmt.close()

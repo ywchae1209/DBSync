@@ -10,6 +10,14 @@ package tui
 
 package object layoutzEx {
 
+  implicit class StringWithColor(s: String) {
+    def yellow: String = s.color(Color.Yellow).render
+    def green: String = s.color(Color.Green).render
+    def cyan: String = s.color(Color.Cyan).render
+    def red: String = s.color(Color.Red).render
+    def brightGreen = s.color(Color.BrightGreen).render
+  }
+
   import scala.language.implicitConversions
 
   type Width = Int
