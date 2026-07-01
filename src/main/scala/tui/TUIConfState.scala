@@ -1,5 +1,6 @@
 package tui
 
+import schema.DBConf.{HikariDataSourceWithConf, displayTo, displayToWith}
 import schema.SchemaCompare.{compareSchemas, fetchSchema, fetchTableNames, jsonCodec}
 import schema.SchemaCompared._
 import schema.{ComparePlan, DBConf, SchemaCompared, TableInfo}
@@ -44,6 +45,8 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
 
   private var dbconf1: Option[DBConf] = Some(dafaultConf1)
   private var dbconf2: Option[DBConf] = Some(defaultConf2)
+  private var dataSource1: Option[HikariDataSourceWithConf] = None
+  private var dataSource2: Option[HikariDataSourceWithConf] = None
   private var Compared: Option[SchemaCompared] = None
 
   private def notLoaded
@@ -51,19 +54,26 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
 
   def connected: Boolean = dbconf1.exists( _.connected) && dbconf2.exists( _.connected)
 
+  val pre_st = "current conf " + "so ta".green
+  val pre_cst = "current connection " + "co".green
+  val pre_pst = "plan apply with "
+  def show_st = displayToWith(pre_st, dbconf1, dbconf2, show )
+  def show_cst = displayToWith(pre_cst, dataSource1.map(_.conf), dataSource2.map(_.conf), show )
+  def show_pst = displayToWith(pre_pst, Compared.map(_.conf1), Compared.map(_.conf2), show )
+
   def setWhere(tableName: String, where: String) = {
     Compared.foreach(c => c.setWhere(tableName, where))
   }
 
   def updateConSetting(kind: String, isA: Boolean) {
 
-    val c = if(isA) dbconf1 else dbconf2
+    val current = if(isA) dbconf1 else dbconf2
     val in = readLineSeq(inst.term, Seq(
       (s"DB connect setting ($kind)",
-        " url     ? ".green, c.map(_.url)) -> false,
-      ("", " schema  ? ".green, c.map(_.schema)) -> false,
-      ("", " id      ? ".green, c.map(_.user)) -> false,
-      ("", " pwd     ? ".green, c.map(_.pass.mkString)) -> true,
+        " url     ? ".green, current.map(_.url)) -> false,
+      ("", " schema  ? ".green, current.map(_.schema)) -> false,
+      ("", " id      ? ".green, current.map(_.user)) -> false,
+      ("", " pwd     ? ".green, current.map(_.pass.mkString)) -> true,
     ))
 
     val conf = DBConf.apply(url= in(0), schema= in(1), user = in(2), pass= in(3))
@@ -71,13 +81,12 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
 
     val confirm = askConfirm(inst.term)
     if(!confirm) return
+    if( conf.neqUrlSchema(current) ) show(bullet + "setting changed. reconnect with " + "co".green)
 
-    if(isA) {
-      dbconf1 = Some(conf)
-    } else {
-      dbconf2 = Some(conf)
-    }
-    show( bullet + s"DB connect setting($kind) is updated.")
+    if(isA) { dbconf1 = Some(conf) }
+    else    { dbconf2 = Some(conf) }
+
+    show( bullet + s"DB connect setting is updated.")
   }
 
   def confOr(isA :Boolean) = {
@@ -96,12 +105,29 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
     } yield( r1 -> r2)
   }
 
+  def comparedForDataSoure ( conf1: Option[DBConf], conf2: Option[DBConf]): Boolean = {
+    Compared.forall( cp => {
+      !cp.conf1.neqUrlSchema(conf1) &&
+        !cp.conf2.neqUrlSchema(conf2)
+    } )
+  }
+
+  def comparedDataSourcesOr: Option[(DataSource, DataSource)] = {
+    val out = dataSourcesOr
+
+    if(comparedForDataSoure(dataSource1.map(_.conf), dataSource2.map(_.conf)))
+      out.orElse{
+        show( bullet + "current connection differ from plan's DBConf. check and re-initialize. see" + "so ta co st lst cst".green )
+        None
+      }
+    else
+      None
+  }
   def dataSourcesOr: Option[(DataSource, DataSource)] = {
 
     val out = for {
-      (c1, c2) <- dbConfsOr
-      d1 <- c1.dataSourceOr("source", show)
-      d2 <- c2.dataSourceOr("target", show)
+      d1 <- dataSource1.orElse{ show(bullet + "not initialized connection(source) " + "co".green); None}
+      d2 <- dataSource2.orElse{ show(bullet + "not initialized connection(source) " + "co".green); None}
     } yield ( d1 -> d2)
 
     out
@@ -124,9 +150,13 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
     val (conf1, conf2) = confs.get
 
     if( conf1.alreadyInitalized("source", show) || conf2.alreadyInitalized("target", show) ) {
-      val confirm = askConfirm(inst.term, bullet + "Re-initialize connection pool.")
+      val confirm = askConfirm(inst.term, bullet + "re-initialize connection pool after close")
       if(!confirm)
         return
+      else {
+        conf1.close()
+        conf2.close()
+      }
     }
 
     val js = JobSpinner.jobSpinner[Boolean]("connect".green)
@@ -138,6 +168,8 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
       val ok2= conf2.initDataSource("target", s => js.setMessage( "(S) " + s))
 
       if (ok1 && ok2) {
+        dataSource1 = conf1.dataSourceOr("source", show)
+        dataSource2 = conf2.dataSourceOr("target", show)
         js.setFinished(true)
       } else {
         conf1.close()
@@ -146,10 +178,14 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
       }
     }
 
-    js.run(clearOnStart= false, clearOnExit = false, terminal= ioterm)
+    val out = js
+      .run(clearOnStart= false, clearOnExit = false, terminal= ioterm)
       .fold(
         e => {show( bullet + s"fail to connect : ${e.getMessage}"); false},
         r => r.getOr.getOrElse(false))
+
+    if(out)
+      show_cst
   }
 
   def selectNames(title: String, hdr: String, names: Seq[String]): Seq[String] = {
@@ -182,12 +218,15 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
     if ( ds.isEmpty) return
     val (ds1, ds2) = ds.get
 
-    val cf1= confOr(isA = true).get
+    val cf1 = confOr(isA = true).get
     val cf2 = confOr(isA = false).get
-
 
     val js = JobSpinner.jobSpinner[SchemaCompared]("init".green)
     val (ns1, ns2) = selectTableNames( ds1, cf1.schema, ds2, cf2.schema, all)
+    if(ns1.isEmpty) {
+      show(bullet + "empty" )
+      return
+    }
 
     val start: Long = java.lang.System.currentTimeMillis()
     Future {
@@ -249,16 +288,19 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
       e => { show(bullet + s"fail to locate plan conf: ${e.getMessage}"); List.empty},
       r => r
     )
-
-    val pn = pname.map(n => s"plan_$n.conf" ).orElse(
-      SingleBox
-        .singleBox("select plan", list)
-        .run( clearOnStart= false, clearOnExit= false, terminal= Some(inst.term))
-        .fold(
-          e => {show(bullet + s"fail to select : ${e.getMessage}"); None},
-          r => Some(r.selectedItem))
-    )
-
+    val pn = pname.map(n => s"plan_$n.conf" ).orElse{
+      if(list.isEmpty) {
+        show(bullet + s"conf file not exist."); None
+        None
+      } else  {
+        SingleBox
+          .singleBox("select plan", list)
+          .run( clearOnStart= false, clearOnExit= false, terminal= Some(inst.term))
+          .fold(
+            e => {show(bullet + s"fail to select : ${e.getMessage}"); None},
+            r => r.selectedItem)
+      }
+    }
     if (pn.isEmpty)
       return None
 
@@ -284,7 +326,6 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
   def setConfIfChanged(cp: SchemaCompared, ask: Boolean = false): Boolean = {
 
     val co = "co".green
-    val in = "list in".green
     def showChanged = show(bullet + "must re-connect before proceed(connection setting changed.). use " + co)
 
     val changed = cp.conf1.neqUrlSchema(dbconf1) || cp.conf2.neqUrlSchema(dbconf2)
@@ -353,7 +394,9 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
   }
 
   def withCompared( f: SchemaCompared => Unit)
-  : Unit = comparePlanOr.foreach( p => f(p))
+  : Unit = {
+    comparePlanOr.foreach( p => { f(p) })
+  }
 
 
   def selectPlansNotIn(names: Set[String]): Seq[ComparePlan] = {
@@ -377,6 +420,7 @@ case class TUIConnection( show: String => Unit, inst: RuntimeShellInstance)(impl
     val ts = selectTables(o.comparable)
     o.comparePlans.filter(p => ts.exists( _.name == p.table.name) )
   }
+
 
 }
 
@@ -402,7 +446,8 @@ case class TUIConfState( show: String => Unit, display: String => Unit, inst: Ru
   def save(path: String = ".", pname: Option[String] = None) = tuiCon.save(path, pname)
   def load(path: String = ".", pname: Option[String] = None) = tuiCon.load(path, pname)
   def load0(path: String = ".", pname: Option[String] = None): Option[SchemaCompared] = tuiCon.load0(path, pname)
-  def dataSourcesOr = tuiCon.dataSourcesOr
+//  def dataSourcesOr: Option[(DataSource, DataSource)] = tuiCon.dataSourcesOr
+  def comparedDataSourcesOr: Option[(DataSource, DataSource)] = tuiCon.comparedDataSourcesOr
   // --------------------------------------------------------------------------------
 
   private def showAllPlan(o: SchemaCompared) = {
@@ -414,6 +459,8 @@ case class TUIConfState( show: String => Unit, display: String => Unit, inst: Ru
   private def detail(l: List[TableInfo]) = tuiCon.detail(l)
 
   def start_init(all: Boolean) = tuiCon.init(all)
+  def show_st    = tuiCon.show_st
+  def show_cst   = tuiCon.show_cst
   def show_b     = withCompared(o => show(summary(o)))
   def show_mka   = withCompared(_.show_mka(show))
   def show_mkb   = withCompared(_.show_mkb(show))
@@ -421,6 +468,7 @@ case class TUIConfState( show: String => Unit, display: String => Unit, inst: Ru
   def show_mcb   = withCompared(_.show_mcb(show))
   def show_oa    = withCompared(_.show_oa (show))
   def show_ob    = withCompared(_.show_ob (show))
+  def show_pst   = tuiCon.show_pst
   def show_l     = withCompared(_.show_l  (show))
   def show_ln    = withCompared(_.show_ln (show))
   def show_lk    = withCompared(_.show_lk (show))
@@ -454,8 +502,8 @@ case class TUIConfState( show: String => Unit, display: String => Unit, inst: Ru
   // compare --------------------------------
   def start_ps(n: Option[Int], debug: Boolean = false) {
 
-    n.foreach( i => show(bullet + s"- process first ${i.toString.yellow} entries."))
-    dataSourcesOr.foreach { case (ds1, ds2) =>
+    n.foreach( i => show(bullet + s"process first ${i.toString.yellow} entries."))
+    comparedDataSourcesOr.foreach { case (ds1, ds2) =>
       val selected = tuiCon.selectPlans()
       for (p <- selected) {
         show(rowElements(p.table).map(_.render).mkString(" "))
@@ -473,9 +521,9 @@ case class TUIConfState( show: String => Unit, display: String => Unit, inst: Ru
   // compare & apply ------------------------
   def start_pa(n: Option[Int], compDebug: Boolean = false, applDebug: Boolean = false , mock: Boolean = false) {
 
-    n.foreach( i => show(bullet + s"- process first ${i.toString.yellow} entries."))
+    n.foreach( i => show(bullet + s"process first ${i.toString.yellow} entries."))
 
-    dataSourcesOr.foreach { case (ds1, ds2) =>
+    comparedDataSourcesOr.foreach { case (ds1, ds2) =>
       val selected = tuiCon.selectPlans()
       if( !mock) {
         val confirm = askConfirm(inst.term, bullet + "Comparison results may be applied to target.")

@@ -1,6 +1,7 @@
 package schema
 
 import com.zaxxer.hikari.HikariDataSource
+import schema.DBConf.HikariDataSourceWithConf
 import tui.SyncTUI.bullet
 import tui.layoutzEx._
 import zio.json.{DeriveJsonCodec, JsonCodec}
@@ -17,7 +18,7 @@ case class DBConf(url: String, user: String, schema: String, pass: Option[String
     }
   }
 
-  private var ds: Option[HikariDataSource] = None
+  private var ds: Option[HikariDataSourceWithConf] = None
 
   def withoutPass = copy(pass = None)
 
@@ -26,7 +27,7 @@ case class DBConf(url: String, user: String, schema: String, pass: Option[String
     close()
     val out = pass
       .orElse{callback(bullet + s"pass is not set($kind)."); None}
-      .flatMap( p => DBConf.createHikariDataSource(url, user,p, callback) )
+      .flatMap( p => DBConf.createHikariDataSource(this, callback) )
 
     ds = out
     ds.isDefined
@@ -39,12 +40,15 @@ case class DBConf(url: String, user: String, schema: String, pass: Option[String
     ds
   }
 
-  def display(kind: String, callback: String => Unit): Unit = {
-    callback( layout( "",
-      s"-- connection setting for " + kind.color(Color.Yellow).render + " ---",
+  def displayWith(prefix: String, callback: String => Unit): Unit = {
+    callback( layout(  prefix,
       table(
         Seq( "url", "schema", "id", "pwd"),
         Seq( Seq( url, schema, user , pass.mkString.map(_ => '*') ) ) ) ).render )
+  }
+
+  def display(kind: String, callback: String => Unit): Unit = {
+    displayWith(s"-- connection setting for ${kind.yellow}", callback)
   }
 
   def alreadyInitalized(kind: String, callback: String => Unit) = {
@@ -66,6 +70,29 @@ case class DBConf(url: String, user: String, schema: String, pass: Option[String
 
 object DBConf {
 
+  def displayToWith(prefix: String, c1: Option[DBConf], c2: Option[DBConf], callback: String => Unit): Unit = {
+    if(c1.isEmpty && c2.isEmpty) {
+      callback(bullet + "empty")
+      return
+    }
+
+    val rows= Seq(
+      c1.map(c => Seq[Element]("source".green, c.url, c.schema, c.user)),
+      c2.map(c => Seq[Element]("target".green, c.url, c.schema, c.user))
+    ).flatten
+
+    callback( layout( bullet + prefix,
+      table(
+        Seq( "", "url", "schema", "id"),
+        rows,
+      )
+    ).render )
+  }
+
+  def displayTo(prefix: String, c1: DBConf, c2: DBConf, callback: String => Unit): Unit = {
+    displayToWith(prefix, Some(c1), Some(c2), callback)
+  }
+
   implicit val jsonCodec: JsonCodec[DBConf] = DeriveJsonCodec.gen[DBConf]
 
   import com.zaxxer.hikari.{HikariConfig, HikariDataSource}
@@ -74,16 +101,18 @@ object DBConf {
     new DBConf(url, user, schema, Some(pass))
   }
 
-  def createHikariDataSource(url: String, user: String, pass: String, callback: String => Unit)
-  : Option[HikariDataSource] = {
+  case class HikariDataSourceWithConf(conf:DBConf, hconfig: HikariConfig) extends HikariDataSource(hconfig)
+
+  def createHikariDataSource(conf: DBConf, callback: String => Unit)
+  : Option[HikariDataSourceWithConf] = {
 
     val config = new HikariConfig()
 
     config.setDriverClassName("oracle.jdbc.OracleDriver")
 
-    config.setJdbcUrl(url)
-    config.setUsername(user)
-    config.setPassword(pass)
+    config.setJdbcUrl(conf.url)
+    config.setUsername(conf.user)
+    config.setPassword(conf.pass.get)
 
     config.setMaximumPoolSize(15)          // todo : modify
     config.setMinimumIdle(2)
@@ -103,7 +132,7 @@ object DBConf {
 
     try {
       val f = Future {
-        val ds = new HikariDataSource(config)
+        val ds = HikariDataSourceWithConf(conf, config)
         val conn = ds.getConnection
         conn.close()
         ds

@@ -197,7 +197,10 @@ case class RunningTasks(
       _ <- state.set(RunningTasksState.Finished)
       c <- activeFibers.getAndSet(Set.empty)
       _ <- ZIO.foreachParDiscard(c){ r =>
-        ZIO.succeed(r.cancelFlag.set(true)) *> r.fiber.interrupt
+        for {
+          _ <- ZIO.succeed(r.cancelFlag.set(true)) // *> r.fiber.interrupt
+//          _ <- r.fiber.interrupt.delay(10.seconds)
+        } yield ()
       }
     } yield ()
 
@@ -223,7 +226,10 @@ case class RunningTasks(
       _ <- ZIO.succeed(show(bullet + "stopped current active tasks."))
       c <- activeFibers.getAndSet(Set.empty)
       _ <- ZIO.foreachParDiscard(c){ r =>
-        ZIO.succeed(r.cancelFlag.set(true)) *> r.fiber.interrupt
+        for {
+          _ <- ZIO.succeed(r.cancelFlag.set(true)) //*> r.fiber.interrupt
+//          _ <- r.fiber.interrupt.delay(10.seconds)
+        } yield()
       }
     } yield ()
 
@@ -231,7 +237,11 @@ case class RunningTasks(
     for {
       c <- activeFibers.get
       _ <- ZIO.foreachDiscard(c.filter(_.task.name == name))( r =>
-        ZIO.succeed(r.cancelFlag.set(true)) *> r.fiber.interrupt )
+        for {
+          _ <- ZIO.succeed(r.cancelFlag.set(true)) // *> r.fiber.interrupt
+//          _ <- r.fiber.interrupt.delay(10.seconds)
+        } yield ()
+      )
     } yield ()
 
   def offer(task: TUITask): UIO[Boolean] =
@@ -244,7 +254,6 @@ case class RunningTasks(
     }
 
   def finishOffer: UIO[Unit] = accepting.set(false)
-
 
   def getRunningState: JobTUIBarStates = runningState
 

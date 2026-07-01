@@ -30,7 +30,7 @@ sealed trait CVal {
       case x@COraGeometry(idx, _)    => s"($idx, ${x.valueStr})"
       case CInterval(idx, value)     => s"($idx, $value)"
       case CXML(idx, value)          => s"($idx, $value)"
-      case x@CLongString(idx, _, _)  => s"($idx, LString(${x.longString.makeString.take(512)}))"
+      case x@CLongString(idx, _, _)  => s"($idx, LString(${x.longString.size}:${x.longString.makeString.take(32)}..))"
       case x@CLongBytes(idx, _, _)   => s"($idx, LBytes(${x.longBytes.makeBytes.length}))"
     }
     case a: CVIncomparable => a match {

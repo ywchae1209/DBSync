@@ -687,7 +687,7 @@ private[layoutzEx] object LayoutzRuntime {
       var lastRenderedState: Option[String] = None
       var lastLineCount: Int = 0
 
-      while (shouldContinue)
+      while (shouldContinue) {
         try {
           val buf: mutable.ListBuffer[String] = mutable.ListBuffer.empty
 
@@ -739,7 +739,6 @@ private[layoutzEx] object LayoutzRuntime {
 //                terminal.write("\u001b[K\n")            // todo <<<
               }
             }
-
             semaphore.strictly { () =>
               buf.foreach( terminal.write)
               terminal.flush()
@@ -750,8 +749,11 @@ private[layoutzEx] object LayoutzRuntime {
           }
           Thread.sleep(config.renderIntervalMs)
         } catch {
-          case ex: Exception => handleRenderError(ex)
+          case ex: Exception =>
+            handleRenderError(ex)
+            shouldContinue = false
         }
+      }
     }
 
     private def runTickLoop(): Unit =

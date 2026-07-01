@@ -6,7 +6,7 @@ import tui.layoutzEx._
 import utils.Implicits.ResultSetIter
 import zio.json.{DeriveJsonCodec, JsonCodec}
 
-import java.sql.{Connection, DatabaseMetaData}
+import java.sql.DatabaseMetaData
 import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.mutable
 import scala.util.Try
@@ -33,11 +33,7 @@ case class SchemaCompared( conf1: DBConf,
   def show_ob (callback: String=> Unit)  = callback(tableOfInfos(onlyInDb2))
   def show_ln (callback: String=> Unit)  = callback(tableOfInfos(filterNoKey))
   def show_lk (callback: String=> Unit)  = callback(tableOfInfos(filterKey))
-  def show_l  (callback: String=> Unit)  = {
-    conf1.display("source", callback)
-    conf1.display("target", callback)
-    callback(tableOfInfos(comparable))
-  }
+  def show_l  (callback: String=> Unit)  = callback(tableOfInfos(comparable))
 
   def setWhere( tableName: String, where: String) = {
     comparePlans.foreach{ cp =>
@@ -45,6 +41,8 @@ case class SchemaCompared( conf1: DBConf,
         cp.setWhere(Some(where))
     }
   }
+
+
 }
 
 object SchemaCompare {
@@ -296,7 +294,7 @@ object SchemaCompared {
     val s = SingleBox.singleBox("select a table", l.map(_.name))
       .run( clearOnStart=false, clearOnExit= false, terminal= Some(term))
       .map(_.selectedItem)
-      .toOption
+      .toOption.flatten
     s
   }
 

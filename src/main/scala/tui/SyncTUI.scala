@@ -17,7 +17,6 @@ object SyncTUI {
 
   val bullet: String = "> ".yellow
   val tuiLogger: Logger = Logger("DBSyncUI")
-
   private val bannerElement: Layout = {
     layout(
       "",
@@ -254,7 +253,7 @@ object SyncTUI {
         .run( clearOnStart = false, clearOnExit = false, terminal = Some(inst.term))
         .fold(
           e => { show(bullet + s"fail to select path: ${e.getMessage}"); None},
-          r => Some(r.selectedItem)
+          r => r.selectedItem
         )
 
       jcf
@@ -265,17 +264,28 @@ object SyncTUI {
 
       val list = getFileSzList("", ".msgpack", path).fold(
         e => { show(bullet + s"fail to find jcf-outs: ${e.getMessage}"); List.empty},
-        r => r.filter(_._2 > 0)
+        r => {
+          val emptyFiles = r.filter(_._2 == 0)
+          if(emptyFiles.nonEmpty) {
+            show( bullet + s"empty files(${emptyFiles.size.toString.green}) exist")
+            display( emptyFiles.map( _._1.green ).mkString("\t", "\n\t", "\n" ))
+          }
+          r.filter(_._2 > 0)
+        }
       )
-      show(bullet + s"${list.size} files exist.")
-      val ret = SingleBox
-        .singleBox("select jcf file", list.map(fs => fs._1 ))
-        .run( clearOnStart = false, clearOnExit = false, terminal = Some(inst.term))
-        .fold(
-          e => {show(bullet + s"fail to select : ${e.getMessage}");None},
-          r => Some(r.selectedItem)
-        )
-      ret
+      if(list.isEmpty) {
+        show(bullet + "no file to view")
+        None
+      } else {
+        val ret = SingleBox
+          .singleBox("select jcf file", list.map(fs => fs._1 ))
+          .run( clearOnStart = false, clearOnExit = false, terminal = Some(inst.term))
+          .fold(
+            e => {show(bullet + s"fail to select : ${e.getMessage}");None},
+            r => r.selectedItem
+          )
+        ret
+      }
     }
 
     private def selectJcfFiles(path: String)(implicit inst: RuntimeShellInstance)
@@ -308,7 +318,7 @@ object SyncTUI {
 
       val (pn, fn, full) = ot.get
 
-      show(bullet + "file: " + full.cyan)
+      show(bullet + "view file: " + full.cyan)
 
       val ii = DiffRowSerDe.readDiffRows(fn, full, () => false, rm => display(rm.statusString))
         .fold(
@@ -317,11 +327,11 @@ object SyncTUI {
 
       val skey = "s q ESC".yellow
       val okey = "other-key".yellow
-      show(bullet + s"press ${skey} to stop, $okey(ex: space) to see next")
+      display(bullet + s"press ${skey} to stop, $okey(ex: space) to see next")
       ii.grouped(5).foreach{ dr =>
         val stop = readForStopOr(inst.term)
         if(stop) return
-        dr.foreach(l => display(bullet + l.toString) )
+        dr.foreach(l => display(bullet + l.toPretty) )
       }
       show(bullet + "done(file view):" + full.cyan)
     }
@@ -360,7 +370,7 @@ object SyncTUI {
 
       if(confirm){
 
-        val f = tuiConf.dataSourcesOr.map{ case (_, ds2) =>
+        val f = tuiConf.comparedDataSourcesOr.map{ case (_, ds2) =>
           (cp:ComparePlan) => {
             val p = Paths.get(pathName)
             val full = p.resolve(cp.name + ".msgpack").toString
@@ -392,7 +402,7 @@ object SyncTUI {
         }
 
         val path = "jcf_" + j.name
-        val f = tuiConf.dataSourcesOr.map { case (ds1, ds2) =>
+        val f = tuiConf.comparedDataSourcesOr.map { case (ds1, ds2) =>
           (cp: ComparePlan) => {
             val p = Paths.get(path, cp.name + ".msgpack").toString
             cp.toCompareToFile(ds1, ds2, p)
@@ -434,7 +444,7 @@ object SyncTUI {
           return
         }
 
-        val f = tuiConf.dataSourcesOr.map{ case (ds1, ds2) => (_: ComparePlan).toCompareApplyTask(ds1, ds2, mock) }
+        val f = tuiConf.comparedDataSourcesOr.map{ case (ds1, ds2) => (_: ComparePlan).toCompareApplyTask(ds1, ds2, mock) }
         if( f.isEmpty) return
 
         val sz = j.list().size
@@ -470,10 +480,10 @@ object SyncTUI {
       help()
     }
     val helpStr = "[hint]" +
-      "\n" + bullet +"init   : so|source ta|target co|connect in|init ia cn|count sa|save lo|load".brightGreen +
-      "\n" + bullet +"table  : br|brief mka mkb mca mcb oa ob l|list ln lk".brightGreen +
+      "\n" + bullet +"init   : so|source ta|target st co|connect in|init ia cn|count sa|save lo|load".brightGreen +
+      "\n" + bullet +"table  : br|brief mka mkb mca mcb oa ob l|list lst ln lk".brightGreen +
       "\n" + bullet +"schema : d|def dn dk mkad mkbd mcad mcbd oad obd".brightGreen +
-      "\n" + bullet +"plan   : p|plan sw ps[10] psa psd[n] pa[n] paa pad[n] pam[n]".brightGreen +
+      "\n" + bullet +"plan   : p|plan pst sw ps[10] psa psd[n] pa[n] paa pad[n] pam[n]".brightGreen +
       "\n" + bullet +"job    : jn|jnew jl jlr|jld jla|jli jsa jsc js[name] jd" .brightGreen +
       "\n" + bullet +"       : ja jad jam jcf jfv jfa jfad jfam" .brightGreen
 
@@ -488,7 +498,9 @@ object SyncTUI {
       cmd  match {
         case "so"| "source" => tuiConf.updateConSetting("source", isA = true)
         case "ta"| "target" => tuiConf.updateConSetting("target", isA = false)
+        case "st"           => tuiConf.show_st
         case "co"| "connect"=> tuiConf.connect()
+        case "cst"          => tuiConf.show_cst
         case "in"| "init"   => tuiConf.start_init(all = false)
         case "ia"           => tuiConf.start_init(all = true)
         case "cn"| "count"  => tuiConf.updateCount()
@@ -502,6 +514,7 @@ object SyncTUI {
         case "oa"           => tuiConf.show_oa
         case "ob"           => tuiConf.show_ob
         case "l" | "list"   => tuiConf.show_l
+        case "pst"          => tuiConf.show_pst
         case "ln"           => tuiConf.show_ln
         case "lk"           => tuiConf.show_lk
         case "d" | "def"    => tuiConf.show_d
@@ -546,7 +559,9 @@ object SyncTUI {
     val fullHelp = List(
       "so |source"   -> "set source DB connect setting",
       "ta |target"   -> "set target DB connect setting",
+      "st"           -> "current db-conf",
       "co |connect"  -> "make connection",
+      "cst"          -> "current connected db-conf",
       "in |init"     -> "load to make compare-plan for selection",
       "ia"           -> "load to make compare-plan",
       "cn |count"    -> "fetch row-counts",
@@ -572,6 +587,7 @@ object SyncTUI {
       "oad"          -> "definition of table only in source",
       "obd"          -> "definition of table only in target",
       "p |plan"      -> "see sqls to comprare and apply",
+      "pst"          -> "plan application db-conf",
       "sw"           -> "set where clause to select sql",
       "ps [n]"       -> "(plan)sample compare. default n=10",
       "psa"          -> "(plan) compare all",

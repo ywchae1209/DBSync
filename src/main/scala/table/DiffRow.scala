@@ -1,8 +1,38 @@
 package table
 
+import tui.layoutzEx.StringWithColor
+
 sealed trait DiffRow {
+
+
   def keys: List[CVal]
   def serialize = DiffRowSerDe.serialize(this)
+  def toPretty: String = {
+
+    val oaStr = "Insert: ".yellow
+    val obStr = "Delete: ".yellow
+    val upStr = "Update: ".yellow
+    val saStr = "Same ".yellow
+    val kstr = "key".green + "["
+    val cstr = "col".green + "["
+    val estr = "]"
+
+    this match {
+      case OnlyInA(keys, sourceVals) =>
+        oaStr +
+          (if (keys.nonEmpty) keys.mkString(kstr, ", ", estr) else "") +
+          (if (sourceVals.nonEmpty) keys.mkString(cstr, ", ", estr) else "")
+      case OnlyInB(keys) =>
+        obStr +
+          (if (keys.nonEmpty) keys.mkString(kstr, ", ", estr) else "")
+      case Update(keys, sourceVals) =>
+        upStr +
+          (if (keys.nonEmpty) keys.mkString(kstr, ", ", estr) else "") +
+          (if (sourceVals.nonEmpty) keys.mkString(cstr, ", ", estr) else "")
+      case Same(keys) =>
+        saStr + (if (keys.nonEmpty) keys.mkString(kstr, ", ", estr) else "")
+    }
+  }
 }
 object DiffRow {
   def fromBytes(bs: Array[Byte]) = DiffRowSerDe.deserialize(bs)
@@ -13,10 +43,12 @@ final case class OnlyInA(keys: List[CVal], sourceVals: List[CVal]) extends DiffR
 }
 final case class OnlyInB(keys: List[CVal] ) extends DiffRow {
   override def toString: String = keys.mkString("B (@:[", ", ", "])")
+
 }
 
 final case class Update(keys: List[CVal], sourceVals: List[CVal] ) extends DiffRow {
   override def toString: String = keys.mkString("U (@:[", ", ", "],") + sourceVals.mkString("A:[", ", ", "]")
+
 }
 
 final case class Same(keys: List[CVal] ) extends DiffRow {
@@ -52,16 +84,12 @@ object DiffRowSerDe {
 
         private def fetchNext(): Option[DiffRow] = {
           if (cancel()) {
-//            println("readDiffRows cancelled")
             callback(ReportMsg(name, s"[Read Stopped] $path by user", Stopped))
             None
           } else if (unpacker.hasNext) {
-//            println("readDiffRows continue")
             val out = unpackDiffRow(unpacker)
-//            println(out.toString)
             Some(out)
           } else {
-//            println("readDiffRows finished")
             fis.close()
             None
           }

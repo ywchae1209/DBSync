@@ -1,11 +1,12 @@
 package tui.layoutzEx
 
 import org.jline.utils.AttributedString
-import tui.SyncTUI.bullet
+import schema.ComparePlan.jobLogger
+import tui.SyncTUI.{bullet, tuiLogger}
 
 import scala.collection.JavaConverters.seqAsJavaListConverter
 import scala.collection.concurrent.TrieMap
-import scala.util.Try
+import scala.util.{Failure, Success, Try}
 
 trait withViewAll{
   def viewAll: Element
@@ -126,7 +127,7 @@ object JPromptShell {
         }
       }
 
-      def show(s: String): Unit = {
+      def display(s: String): Unit = {
         semaphore.strictly{ () =>
           jTermWrapper.writeLine(s)
           jTermWrapper.flush()
@@ -140,12 +141,14 @@ object JPromptShell {
             p <- Try(shellApp.handleIO(prompt, l, self))
           } yield p
 
-          if(p1.isFailure) {
-            // todo :: g3nie -- logging
-            shouldContinue = false
-          } else {
-            if(shellApp.stopIOLoop())
+          p1 match {
+            case Failure(e) =>
+              display(bullet + s"Terminated by an unexpected exception: ${e.getMessage}")
+              tuiLogger.error(bullet + s"Terminated by an unexpected exception".green, e)
               shouldContinue = false
+            case Success(_) =>
+              if(shellApp.stopIOLoop())
+                shouldContinue = false
           }
           Thread.sleep(50)
         }
@@ -444,14 +447,14 @@ object JobSpinner {
 object SingleBox {
 
   case class SBState( opts: Seq[String],
-                      selected: Int = 0,
+                      selected: Option[Int] = Some(0),
                       currentPg: Int = 0,
                       cursor: Int = 0,
                       active: Boolean = false )
   {
-    def selectedItem = opts(selected)
+    def selectedItem = selected.map(opts)
     override def toString: String =
-      s"SingleBox( #opt: ${opts.size}, selected: $selectedItem)"
+      s"SingleBox( #opt: ${opts.size}, selected: ${selectedItem.mkString})"
   }
 
   sealed trait SBMsg
@@ -459,7 +462,7 @@ object SingleBox {
   private case object SBDown   extends SBMsg
   private case object SBPgUp   extends SBMsg
   private case object SBPgDown extends SBMsg
-  private case object SBSelect extends SBMsg
+  private case object SBToggle extends SBMsg
   private case object SBOK     extends SBMsg
 
   def singleBox(header: String,
@@ -469,13 +472,17 @@ object SingleBox {
                 active: Boolean = true)
   = new LayoutzApp[SBState, SBMsg] with withViewAll {
 
+    if(options.headOption.isEmpty)
+      throw new IllegalArgumentException("singleBox : empty options")
+
+
     val totalRow = options.size
     val unitRows = pageRow.min(totalRow)
     val totalPage = if( totalRow % pageRow == 0) (totalRow / pageRow) else (totalRow / pageRow) + 1
     val zippedOpts = options.zipWithIndex
 
     override def init: (SBState, Cmd[SBMsg]) =
-      SBState( options, selection, active = active) -> Cmd.none
+      SBState( options, Some(selection), active = active) -> Cmd.none
 
     override def update(msg: SBMsg, state: SBState): (SBState, Cmd[SBMsg]) = {
       msg match {
@@ -502,9 +509,14 @@ object SingleBox {
         case SBOK     =>
           state.copy( active = false) -> Cmd.exit
 
-        case SBSelect  =>
+        case SBToggle  =>
           if(!state.active) state -> Cmd.none else {
-            state.copy( selected = state.cursor)  -> Cmd.none
+
+            if(state.selected.contains(state.cursor)) {
+              state.copy( selected = None)  -> Cmd.none
+            } else
+              state.copy( selected = Some(state.cursor))  -> Cmd.none
+
           }
       }
     }
@@ -519,8 +531,8 @@ object SingleBox {
       case Key.Char(c) if c == 'p' => Some(SBPgUp)
       case Key.Char(c) if c == 'j' => Some(SBDown)
       case Key.Char(c) if c == 'k' => Some(SBUp)
-      case Key.Char(c) if c == 's' => Some(SBSelect)
-      case Key.Char(c) if c == ' ' => Some(SBSelect)
+      case Key.Char(c) if c == 's' => Some(SBToggle)
+      case Key.Char(c) if c == ' ' => Some(SBToggle)
       case _ => None
     }
 
@@ -538,7 +550,7 @@ object SingleBox {
         )
         val se = rowTight(
           "  ✓ ",
-          s"${state.selectedItem}".color(Color.Green),
+          s"${state.selectedItem.mkString}".color(Color.Green),
         )
 
         rowTight(
@@ -553,8 +565,8 @@ object SingleBox {
       val ls = {
         val out = viewport(state).map{ case (opt, idx) =>
 
-          val selected = idx == state.selected
-          val ma: Element = if(selected) "● ".color(Color.BrightCyan) else "○ "
+          val selected = state.selected.contains(idx)
+          val ma: Element = if(selected) "● ".color(Color.BrightCyan) else "○ "      //g3nie
           val se: Element = if(selected) opt.color(Color.BrightCyan).style(Style.Underline) else opt
 
           val ln = if(totalPage > 1) f"${idx+1}%5d │" else l0

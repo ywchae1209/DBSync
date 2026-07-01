@@ -1,7 +1,7 @@
 package schema
 
 import com.typesafe.scalalogging.Logger
-import schema.ComparePlan.{CancelledException, cancelleableIt, jobLogger}
+import schema.ComparePlan.{CancelledException, LimitReachedException, cancelableIt, jobLogger}
 import schema.SchemaCompared.rowElements
 import table._
 import tui.{Aborted, HasName, ReportMsg, TUITask}
@@ -55,16 +55,20 @@ case class ComparePlan( table: TableInfo, // TableInfo,
         val comp = new TableComparer(self, false)
 
         val it0 = comp.compareIt(s1, s2, reportIt)
-        val it = cancelleableIt(it0, cancel, None)
+        val it = cancelableIt(it0, cancel, None)
         val filtered = it.filterNot(_.isInstanceOf[Same])
         val con = if(mock) new Mockup.LoggingConnection else s2.getConnection
 
         try{
-          TableComparer.applyChanges( self, filtered,
+          TableComparer.applyChanges(
+            self,
+            filtered,
             con,
             reportAp,
             debug= false)
-        } finally {
+
+        }
+        finally {
           con.close()
           it0.close()
         }
@@ -90,7 +94,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
         val comp = new TableComparer(self, false)
 
         val it0 = comp.compareIt(s1, s2, reportIt)
-        val it = cancelleableIt(it0, cancel, None)
+        val it = cancelableIt(it0, cancel, None)
         val filtered = it.filterNot(_.isInstanceOf[Same])
         try{
           val done = writeDiffRows(table.name, path, filtered, cancel, notice)
@@ -166,13 +170,14 @@ case class ComparePlan( table: TableInfo, // TableInfo,
 
     val comp = new TableComparer(this, compDebug)
     val it0 = comp.compareIt(s1, s2, reportIt)
-    val it = cancelleableIt(it0, cancel, limit)
+    val it = cancelableIt(it0, cancel, limit)
     try {
       while (it.hasNext) {
         it.next()
       }
     } catch {
       case e: CancelledException => reportIt(0,0,0,0,0,0, "cancelled at " + e.at.toString, true)
+//      case e: LimitReachedException => reportIt(0,0,0,0,0,0, "limit reached " + e.n, true)
       case e: Throwable => reportIt(0,0,0,0,0,0, s"failed: ${e.getMessage}", true)
         throw e
     } finally {
@@ -193,7 +198,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
 
     val comp = new TableComparer(this, compDebug)
     val it0 = comp.compareIt(s1, s2, reportIt)
-    val it = cancelleableIt(it0, cancel, limit)
+    val it = cancelableIt(it0, cancel, limit)
     val filtered = it.filterNot(_.isInstanceOf[Same])
     val con = if(applDebug) new Mockup.LoggingConnection else s2.getConnection
 
@@ -284,30 +289,31 @@ object ComparePlan {
 
   val jobLogger = Logger("DBSyncJob")
   case class CancelledException(at: LocalDateTime) extends RuntimeException(s"cancelled at $at")
+  case class LimitReachedException(n: Int) extends RuntimeException(s"reached to limit $n")
 
-  def cancelleableIt[A](it: Iterator[A] with AutoCloseable,
-                        cancel: () => Boolean,
-                        limit: Option[Int]
+  def cancelableIt[A](it: Iterator[A] with AutoCloseable,
+                      cancel: () => Boolean,
+                      limit: Option[Int]
                        ) : Iterator[A]
   = new Iterator[A] {
     val nlimit = limit.getOrElse(0)
     var n = 1
+
     override def hasNext: Boolean = it.hasNext
 
     override def next(): A = {
-      val needStop = cancel() || (nlimit != 0 && n >= nlimit)
-
-      if(needStop) {
+      if(cancel()) {
         it.close()
         throw CancelledException(LocalDateTime.now())
-      } else {
-        n += 1
-        it.next()
       }
+      if(nlimit != 0 && n >= nlimit) {
+        it.close()
+        throw LimitReachedException(n)
+      }
+      n += 1
+      it.next()
     }
   }
-
-
 
   implicit val jsonCodec: JsonCodec[ComparePlan] = DeriveJsonCodec.gen[ComparePlan]
 
@@ -401,7 +407,7 @@ object ComparePlan {
     ctx.readers += createCReader(c, idx, "", c.jdbcType, isVirtual = false)
 
     if (keyCols.contains(c.name)) {
-      // 정렬 키 그룹에 속한 경우만 ORDER BY 구문 및 CompKey 계획에 추가
+      // 정렬 키 그룹에 속한 경우만 ORDER BY 구문 및 CompKey 추가
       ctx.orderParts   += s"${c.name} ASC"
       ctx.sortKeyPlans += CompKey(c.name, idx, idx)
     } else {

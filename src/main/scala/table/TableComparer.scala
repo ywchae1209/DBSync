@@ -296,7 +296,8 @@ object TableComparer {
   }
 
   /** ------------------------------ */
-  def applyChanges(plan: ComparePlan, diffs: Iterator[DiffRow], targetConn: Connection,
+  def applyChanges(plan: ComparePlan, diffs: Iterator[DiffRow],
+                   targetConn: Connection,
                    notice: (Long, Long, Long, Long, Boolean) => Unit,
                    debug: Boolean,
                    batchSize: Int = 512) = {
@@ -313,6 +314,8 @@ object TableComparer {
       val keyIndices= plan.keyIndices
       val hasLongColumn = valIndices.exists(i => i._2 == java.sql.Types.LONGVARCHAR || i._2 == java.sql.Types.LONGNVARCHAR)
 
+      val it = diffs.iterator
+      val it0 = diffs
       diffs.foreach {
         // insert -----------
         case OnlyInA(keys, sourceVals) =>
