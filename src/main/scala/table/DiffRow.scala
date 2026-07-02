@@ -4,11 +4,13 @@ import tui.layoutzEx.StringWithColor
 
 sealed trait DiffRow {
 
+  def isInsert = DiffRow.isOnlyA(this)
+  def isUpdate = DiffRow.isUpdate(this)
+  def isDelete = DiffRow.isOnlyB(this)
 
   def keys: List[CVal]
   def serialize = DiffRowSerDe.serialize(this)
   def toPretty: String = {
-
     val oaStr = "Insert: ".yellow
     val obStr = "Delete: ".yellow
     val upStr = "Update: ".yellow
@@ -36,6 +38,12 @@ sealed trait DiffRow {
 }
 object DiffRow {
   def fromBytes(bs: Array[Byte]) = DiffRowSerDe.deserialize(bs)
+
+  val isOnlyA = (dr: DiffRow) => dr.isInstanceOf[OnlyInA]
+  val isOnlyB = (dr: DiffRow) => dr.isInstanceOf[OnlyInB]
+  val isUpdate = (dr: DiffRow) => dr.isInstanceOf[Update]
+  val isSame = (dr: DiffRow) => dr.isInstanceOf[Same]
+  val isNotSame =(dr: DiffRow) => !dr.isInstanceOf[Same]
 }
 
 final case class OnlyInA(keys: List[CVal], sourceVals: List[CVal]) extends DiffRow {

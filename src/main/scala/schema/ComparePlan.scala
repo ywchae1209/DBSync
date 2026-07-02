@@ -8,6 +8,7 @@ import tui.{Aborted, HasName, ReportMsg, TUITask}
 import tui.{Aborted, Finished, HasName, InProgress, ReportMsg, Stopped, TUITask, TaskStatus}
 import zio.json.{DeriveJsonCodec, JsonCodec}
 import tui.layoutzEx._
+import DiffRow._
 
 import java.time.LocalDateTime
 import javax.sql.DataSource
@@ -109,7 +110,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
     }
   }
 
-  def toApplyFromFile(s2: DataSource, path: String, mock: Boolean, applDebug: Boolean = false): TUITask = {
+  def toApplyFromFile(s2: DataSource, path: String, pred: DiffRow => Boolean, mock: Boolean, applDebug: Boolean = false): TUITask = {
 
     import DiffRowSerDe.readDiffRows
 
@@ -121,7 +122,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
         try{
           val it0 = readDiffRows(table.name, path, cancel, notice)
           val done = it0.map( it =>
-            TableComparer.applyChanges( self, it, con, reportAp, debug= applDebug)
+            TableComparer.applyChanges( self, it.filter(pred), con, reportAp, debug= applDebug)
           )
           done match {
             case Left(e) => //notice(ReportMsg(name, s"[Apply Abort] ${e.getMessage}", Aborted))
@@ -190,6 +191,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
                      limit: Option[Int],
                      cancel: () => Boolean,
                      notice: ReportMsg => Unit,
+                     filterPred: DiffRow => Boolean = isNotSame,
                      compDebug: Boolean = false,
                      applDebug: Boolean = false) = {
 
@@ -199,7 +201,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
     val comp = new TableComparer(this, compDebug)
     val it0 = comp.compareIt(s1, s2, reportIt)
     val it = cancelableIt(it0, cancel, limit)
-    val filtered = it.filterNot(_.isInstanceOf[Same])
+    val filtered = it.filter(filterPred)
     val con = if(applDebug) new Mockup.LoggingConnection else s2.getConnection
 
     try{

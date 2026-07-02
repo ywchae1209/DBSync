@@ -1,7 +1,9 @@
 package tui.layoutzEx
 
-import org.jline.utils.Status
+import org.jline.terminal.Terminal
+import org.jline.utils.{AttributedString, Display, Status}
 
+import scala.collection.JavaConverters.seqAsJavaListConverter
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
 import scala.io.Source
@@ -227,6 +229,7 @@ private[layoutzEx] case class RuntimeConfig(
                                          )
 
 trait Terminal {
+  val jTerm: org.jline.terminal.Terminal
   def enterRawMode(): Unit
   def exitRawMode(): Unit
   def clearScreen(): Unit
@@ -251,18 +254,12 @@ case class InputError(getMessage: String, cause: Option[Throwable] = None) exten
 
 
 import org.jline.terminal.{TerminalBuilder, Terminal => JLineTerminal}
+
 /** added to raw-input fo Windows & Unix-like  */
 case class JLineTerminalWrapper (jTerm: JLineTerminal ) extends Terminal {
 
   import org.jline.reader.LineReaderBuilder
-  import org.jline.terminal.{TerminalBuilder, Terminal => JLineTerminal}
   import org.jline.utils.InfoCmp.Capability
-
-//  private val terminal: JLineTerminal =
-//    TerminalBuilder.builder()
-//    .system(true)
-//    .build()
-
 
   // 2. 초기 상태(Attributes) 저장 (나중에 복구용)
   private val originalAttributes = jTerm.getAttributes
@@ -298,9 +295,7 @@ case class JLineTerminalWrapper (jTerm: JLineTerminal ) extends Terminal {
   def flush(): Unit = jTerm.flush()
 
   // non-blocking : read single character
-  def readInput(): Int = {
-    reader.read(1L)
-  }
+  def readInput(): Int = { reader.read(1L) }
 
   // non-blocking:  read single character
   def readInputNonBlocking(): Option[Int] = {
@@ -319,10 +314,22 @@ case class JLineTerminalWrapper (jTerm: JLineTerminal ) extends Terminal {
 object JLineTerminalWrapper {
   def create(): Either[TerminalError, JLineTerminalWrapper] = {
     try {
-      val terminal: JLineTerminal =
-        TerminalBuilder.builder()
-          .system(true)
-          .build()
+      var terminal: JLineTerminal = null
+      terminal = TerminalBuilder.builder()
+        .system(true)
+//        .signalHandler( new Terminal.SignalHandler {
+//          override def handle(signal: Terminal.Signal)
+//          : Unit = signal match {
+//            case Terminal.Signal.CONT => if(terminal != null) {
+//              terminal.enterRawMode()
+//              terminal.flush()
+//            }
+//            case Terminal.Signal.WINCH =>
+//
+//            case _ =>
+//          }
+//        })
+        .build()
       Right(new JLineTerminalWrapper(terminal))
     }
     catch {
@@ -683,6 +690,28 @@ private[layoutzEx] object LayoutzRuntime {
 
     private val lastPollTimes = scala.collection.mutable.Map[String, Long]()
 
+//    private def runRenderLoop(): Unit = {
+//      val jTerm = terminal.jTerm
+//      val jlineDisplay = new Display(jTerm, true)
+//      while (shouldContinue) {
+//        try {
+//          val status = readState()
+//          val currentRender = app.view(status).render
+//          val renderedLines = currentRender.split("\n", -1).toList
+//
+//          semaphore.strictly { () =>
+//            jlineDisplay.resize(jTerm.getHeight, jTerm.getWidth)
+//            jlineDisplay.update(renderedLines.map(AttributedString.fromAnsi).asJava, 0)
+//          }
+//          Thread.sleep(config.renderIntervalMs)
+//        } catch {
+//          case ex: Exception =>
+//            handleRenderError(ex)
+//            shouldContinue = false
+//        }
+//      }
+//    }
+
     private def runRenderLoop(): Unit = {
       var lastRenderedState: Option[String] = None
       var lastLineCount: Int = 0
@@ -706,11 +735,9 @@ private[layoutzEx] object LayoutzRuntime {
             if (config.clearOnStart) {
               /* Absolute positioning when screen was cleared */
               buf.append("\u001b[H")
-//              terminal.write("\u001b[H")                    // todo <<<<
             } else if (lastLineCount > 0) {
               /* Relative positioning: move up by lines we previously rendered */
               buf.append(s"\u001b[${lastLineCount}A\r")
-//              terminal.write(s"\u001b[${lastLineCount}A\r") // todo <<<<
             }
 
             /* Apply alignment to layout as a block (uniform margin for all lines) */
@@ -729,14 +756,12 @@ private[layoutzEx] object LayoutzRuntime {
             /* Write each line with clear-to-end-of-line */
             alignedLines.foreach { line =>
               buf.append(line + "\u001b[K\n")
-//              terminal.write(line + "\u001b[K\n")       // todo <<<<
             }
             /* Clear any extra lines from the previous render */
             val extraLines = lastLineCount - currentLineCount
             if (extraLines > 0) {
               (0 until extraLines).foreach { _ =>
                buf.append("\u001b[K\n")
-//                terminal.write("\u001b[K\n")            // todo <<<
               }
             }
             semaphore.strictly { () =>

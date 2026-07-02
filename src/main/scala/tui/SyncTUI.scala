@@ -7,6 +7,7 @@ import tui.layoutzEx.JPromptShell._
 import tui.layoutzEx._
 import _root_.table.DiffRowSerDe
 import com.typesafe.scalalogging.Logger
+import schema.ComparePlan.jobLogger
 import utils.LogHelper.getFileSzList
 import zio.Runtime
 
@@ -336,7 +337,7 @@ object SyncTUI {
       show(bullet + "done(file view):" + full.cyan)
     }
 
-    private def fileToApplyJob(par: Int, mock: Boolean = false, applDebug: Boolean = false)(implicit inst: RuntimeShellInstance)
+    private def fileToApplyJob(par: Int, kind: Option[String] = None, mock: Boolean = false, applDebug: Boolean = false)(implicit inst: RuntimeShellInstance)
     : Unit = {
       if(jobIsRunning ) return
       if(tuiJobState.nonEmpty || tuiJobState.exists(_.isRunning)) {
@@ -365,7 +366,8 @@ object SyncTUI {
         (j -> names.size)
       }
 
-      val jfa = "File-to-apply".yellow
+      val jfa = "file-to-apply".yellow
+      val kindPred = tuiConf.kindFilter(kind)
       val confirm = askConfirm(inst.term, bullet + s"File-to-apply start($sz tables) with $par threads.\n")
 
       if(confirm){
@@ -374,7 +376,7 @@ object SyncTUI {
           (cp:ComparePlan) => {
             val p = Paths.get(pathName)
             val full = p.resolve(cp.name + ".msgpack").toString
-            cp.toApplyFromFile(ds2, full, mock = mock, applDebug= applDebug)
+            cp.toApplyFromFile(ds2, full, kindPred, mock = mock, applDebug= applDebug)
           }
         }
 
@@ -469,6 +471,7 @@ object SyncTUI {
     override def onStart(term: Terminal): Unit = {
       term.enterRawMode()
       bannerElement.render.split("\\n").foreach { term.writeLine }
+      jobLogger.info("---------- DBSync started ----------".cyan)
     }
     override def onExit(term: Terminal): Unit = {
       term.exitRawMode()
@@ -483,18 +486,21 @@ object SyncTUI {
       "\n" + bullet +"init   : so|source ta|target st co|connect in|init ia cn|count sa|save lo|load".brightGreen +
       "\n" + bullet +"table  : br|brief mka mkb mca mcb oa ob l|list lst ln lk".brightGreen +
       "\n" + bullet +"schema : d|def dn dk mkad mkbd mcad mcbd oad obd".brightGreen +
-      "\n" + bullet +"plan   : p|plan pst sw ps[10] psa psd[n] pa[n] paa pad[n] pam[n]".brightGreen +
+      "\n" + bullet +"plan   : p|plan pst sw ps[10] psa psd[n] pa[n] paa[iud] pad[n] pam[n]".brightGreen +
       "\n" + bullet +"job    : jn|jnew jl jlr|jld jla|jli jsa jsc js[name] jd" .brightGreen +
-      "\n" + bullet +"       : ja jad jam jcf jfv jfa jfad jfam" .brightGreen
+      "\n" + bullet +"       : ja jad jam jcf jfv jfa jfad jfak[iud][pn] jfam" .brightGreen
 
     def help() = display(helpStr)
 
-    private def toIntOr(s: Option[String], orElse: Int) = s.flatMap(_.toIntOption).getOrElse(orElse)
+    private def toIntOr(s: Option[String], orElse: Int): Int = {
+      s.flatMap(_.toIntOption).getOrElse{ orElse }
+    }
 
-    private def commandHandler(cmd: String, rest: List[String])(implicit inst: RuntimeShellInstance)
+    private def commandHandler(cmd: String, opts: List[String])(implicit inst: RuntimeShellInstance)
     : Unit = {
 
-      tuiLogger.info(bullet + "(user) "+ rest.mkString(cmd, " ", "").green)
+      tuiLogger.info(bullet + "(user) "+ opts.mkString(cmd, " ", "").green)
+      val rest = opts.lift
       cmd  match {
         case "so"| "source" => tuiConf.updateConSetting("source", isA = true)
         case "ta"| "target" => tuiConf.updateConSetting("target", isA = false)
@@ -528,91 +534,98 @@ object SyncTUI {
         case "obd"          => tuiConf.show_obd
         case "p" | "plan"   => tuiConf.show_plan
         case "sw"           => tuiConf.setWhere
-        case "ps"           => tuiConf.start_ps(Some(toIntOr(rest.headOption, 10)))
+        case "ps"           => tuiConf.start_ps(Some(toIntOr(rest(0), 10)))
         case "psa"          => tuiConf.start_ps(None)
-        case "psd"          => tuiConf.start_ps(Some(toIntOr(rest.headOption, 5)), debug = true)
-        case "pa"           => tuiConf.start_pa(Some(toIntOr(rest.headOption, 10)))
-        case "paa"          => tuiConf.start_pa(None)
-        case "pad"          => tuiConf.start_pa(Some(toIntOr(rest.headOption, 5)), compDebug = true, applDebug= true)
-        case "pam"          => tuiConf.start_pa(Some(toIntOr(rest.headOption, 5)), compDebug = true, applDebug= true , mock = true)
+        case "psd"          => tuiConf.start_ps(Some(toIntOr(rest(0), 5)), debug = true)
+        case "pa"           => tuiConf.start_pa(Some(toIntOr(rest(0), 10)))
+        case "paa"          => tuiConf.start_pa(None, kind = rest(0))
+        case "pad"          => tuiConf.start_pa(Some(toIntOr(rest(0), 5)), compDebug = true, applDebug= true)
+        case "pam"          => tuiConf.start_pa(Some(toIntOr(rest(0), 5)), compDebug = true, applDebug= true , mock = true)
         case "jn"  | "jnew" => newJob
         case "jl"           => listJob
         case "jlr" | "jld"  => delJob
         case "jla" | "jli"  => insJob
         case "jsa"          => stopAllJob(SM_all)
         case "jsc"          => stopAllJob(SM_activeAll)
-        case "js"           => stopJobs(rest)
+        case "js"           => stopJobs(opts)
         case "jd"           => detailJob
-        case "ja"           => compareToApplyJob0(toIntOr(rest.headOption, 2))
-        case "jad"          => compareToApplyJob0(toIntOr(rest.headOption, 2), debug = true)
-        case "jam"          => compareToApplyJob0(toIntOr(rest.headOption, 2), debug = true, mock = true)
-        case "jcf"          => compareToFileJob(toIntOr(rest.headOption, 2))
+        case "ja"           => compareToApplyJob0(toIntOr(rest(0), 2))
+        case "jad"          => compareToApplyJob0(toIntOr(rest(0), 2), debug = true)
+        case "jam"          => compareToApplyJob0(toIntOr(rest(0), 2), debug = true, mock = true)
+        case "jcf"          => compareToFileJob(toIntOr(rest(0), 2))
         case "jfv"          => fileToView()
-        case "jfa"          => fileToApplyJob(toIntOr(rest.headOption, 2))    // todo
-        case "jfad"         => fileToApplyJob(toIntOr(rest.headOption, 2), applDebug = true)
-        case "jfam"         => fileToApplyJob(toIntOr(rest.headOption, 2), applDebug = true, mock = true)
+        case "jfa"          => fileToApplyJob(toIntOr(rest(0), 2))  // todo
+        case "jfac"         => fileToView()                         // todo
+        case "jfak"         => fileToApplyJob(toIntOr(rest(1), 2), kind = rest(0))
+        case "jfad"         => fileToApplyJob(toIntOr(rest(0), 2), applDebug = true)
+        case "jfam"         => fileToApplyJob(toIntOr(rest(0), 2), applDebug = true, mock = true)
 
         case "h" | "help" | "hint" => display(fullHelp)
         case o               => dontKnow(show, o.color(Color.Red).render)
+
       }
     }
     val fullHelp = List(
-      "so |source"   -> "set source DB connect setting",
-      "ta |target"   -> "set target DB connect setting",
-      "st"           -> "current db-conf",
-      "co |connect"  -> "make connection",
-      "cst"          -> "current connected db-conf",
-      "in |init"     -> "load to make compare-plan for selection",
-      "ia"           -> "load to make compare-plan",
-      "cn |count"    -> "fetch row-counts",
-      "sa |save"     -> "save conf",
-      "lo |load"     -> "load conf",
-      "br |brief"    -> "brief compare-plan",
-      "mka"          -> "list mismatch-key tables of source",
-      "mkb"          -> "list mismatch-key tables of target",
-      "mca"          -> "list mismatch-col tables of source",
-      "mcb"          -> "list mismatch-col tables of target",
-      "oa"           -> "list tables only in source",
-      "ob"           -> "list tables only in target",
-      "l |list"      -> "list comparable tables",
-      "ln"           -> "list comparable no-key-existing tables",
-      "lk"           -> "list comparable key-existing tables",
-      "d |def"       -> "definition of table",
-      "dn"           -> "definition of no-key-existing table",
-      "dk"           -> "definition of key-existing table",
-      "mkad"         -> "definition of mismatch-key table of source",
-      "mkbd"         -> "definition of mismatch-key table of target",
-      "mcad"         -> "definition of mismatch-col table of source",
-      "mcbd"         -> "definition of mismatch-col table of target",
-      "oad"          -> "definition of table only in source",
-      "obd"          -> "definition of table only in target",
-      "p |plan"      -> "see sqls to comprare and apply",
-      "pst"          -> "plan application db-conf",
-      "sw"           -> "set where clause to select sql",
-      "ps [n]"       -> "(plan)sample compare. default n=10",
-      "psa"          -> "(plan) compare all",
-      "psd [n]"      -> "(plan) compare with logging(to log-file). n=5",
-      "pa [n]"       -> "(plan) compare and apply. default n= 10",
-      "paa"          -> "(plan) compare and apply all",
-      "pad"          -> "(plan) paa with debug. n=5",
-      "pam"          -> "(plan) pad but, appply to mock-up(not target). n=5",
-      "jn | jnew"    -> "(job) make new job.(will run in multi-thread)",
-      "jl"           -> "(job) list",
-      "jlr | jld"    -> "(job) list remove",
-      "jla | jli"    -> "(job) list add",
-      "jsa"          -> "(job) stop all-tasks of running job",
-      "jsc"          -> "(job) stop current-tasks of running job",
-      "js [name..]"  -> "(job) stop tasks by names",
-      "jd"           -> "(job) running or done result.",
-      "ja [pn]"      -> "(job) compare and apply with pn thread. pn=2",
-      "jad [pn]"     -> "(job) pa with logging (to log-file)",
-      "jam [pn]"     -> "(job) pad but, apply to mock-up(not target)",
-      "jcf [pn]"     -> "(job) compare to file",
-      "jfv"          -> "(job) view stored file",
-      "jfa [pn]"     -> "(job) file to apply",
-      "jfad [pn]"    -> "(job) file to apply with logging(to log-file)",
-      "jfam [pn]"    -> "(job) jfad but apply to mock-up(not-target)",
-    ).map{case (c, d) => bullet + f"${c}%-12s".green + d}.mkString("\n")
+      "so |source"     -> "set source DB connect setting",
+      "ta |target"     -> "set target DB connect setting",
+      "st"             -> "current db-conf",
+      "co |connect"    -> "make connection",
+      "cst"            -> "current connected db-conf",
+      "in |init"       -> "load to make compare-plan for selection",
+      "ia"             -> "load to make compare-plan",
+      "cn |count"      -> "fetch row-counts",
+      "sa |save"       -> "save conf",
+      "lo |load"       -> "load conf",
+      "br |brief"      -> "brief compare-plan",
+      "mka"            -> "list mismatch-key tables of source",
+      "mkb"            -> "list mismatch-key tables of target",
+      "mca"            -> "list mismatch-col tables of source",
+      "mcb"            -> "list mismatch-col tables of target",
+      "oa"             -> "list tables only in source",
+      "ob"             -> "list tables only in target",
+      "l |list"        -> "list comparable tables",
+      "ln"             -> "list comparable no-key-existing tables",
+      "lk"             -> "list comparable key-existing tables",
+      "d |def"         -> "definition of table",
+      "dn"             -> "definition of no-key-existing table",
+      "dk"             -> "definition of key-existing table",
+      "mkad"           -> "definition of mismatch-key table of source",
+      "mkbd"           -> "definition of mismatch-key table of target",
+      "mcad"           -> "definition of mismatch-col table of source",
+      "mcbd"           -> "definition of mismatch-col table of target",
+      "oad"            -> "definition of table only in source",
+      "obd"            -> "definition of table only in target",
+      "p |plan"        -> "see SQL used to compare and apply",
+      "pst"            -> "plan application db-conf",
+      "sw"             -> "set where clause to select sql",
+      "ps [n]"         -> "(plan)sample compare. default n=10",
+      "psa"            -> "(plan) compare all",
+      "psd [n]"        -> "(plan) compare with logging(to log-file). n=5",
+      "pa [n]"         -> "(plan) compare and apply. default n= 10",
+      "paa [iud]"      -> "(plan) compare and apply all. iud=kind to apply",
+      "pad"            -> "(plan) paa with debug. n=5",
+      "pam"            -> "(plan) pad but, appply to mock-up(not target). n=5",
+      "jn | jnew"      -> "(job) make new job.(will run in multi-thread)",
+      "jl"             -> "(job) list",
+      "jlr | jld"      -> "(job) list remove",
+      "jla | jli"      -> "(job) list add",
+      "jsa"            -> "(job) stop all-tasks of running job",
+      "jsc"            -> "(job) stop current-tasks of running job",
+      "js [name..]"    -> "(job) stop tasks by names",
+      "jd"             -> "(job) running or done result.",
+      "ja [pn]"        -> "(job) compare and apply with pn thread. pn=2",
+      "jad [pn]"       -> "(job) pa with logging (to log-file)",
+      "jam [pn]"       -> "(job) pad but, apply to mock-up(not target)",
+      "jcf [pn]"       -> "(job) compare to file",
+      "jfv"            -> "(job) view stored file",
+
+      "jfa [pn]"       -> "(job) file to apply",
+      "jfac"           -> "(job) file to apply. continue after offset",
+      "jfak [iud] [pn]"-> "(job) file to apply. selected kind(insert, update, delete).",
+      "jfad [pn]"      -> "(job) file to apply with logging(to log-file)",
+      "jfam [pn]"      -> "(job) jfad but apply to mock-up(not-target)",
+
+    ).map{case (c, d) => bullet + f"${c}%-17s".green + d}.mkString("\n")
 
     override def handleIO(prompt: String, line: String, inst: RuntimeShellInstance) : Unit = {
 
@@ -625,13 +638,15 @@ object SyncTUI {
       val rest: List[String] = if(token.isDefinedAt(1)) token.tail.toList else List.empty
 
       cmd match {
-        case "exit" | "q" => show("see you again~~".color(Color.Cyan).render); exit = true
+        case "exit" | "q" =>
+          display("see you again~~".cyan);
+          jobLogger.info("---------- DBSync ended   ----------".cyan)
+          exit = true
         case _            => commandHandler(cmd, rest)
       }
     }
     override def stopIOLoop(): Boolean = exit
   }
-
 
   // --------------------------------------------------------------------------------
   def main(args: Array[String]): Unit = {

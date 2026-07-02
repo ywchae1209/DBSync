@@ -5,7 +5,7 @@ import schema.ComparePlan
 import tui.layoutzEx._
 import utils.LogHelper.{memo, note, oops}
 
-import java.io.StringReader
+import java.io.{InputStream, StringReader}
 import java.sql.{Connection, PreparedStatement, ResultSet, Types}
 import java.time.{Instant, ZoneId}
 import javax.sql.DataSource
@@ -295,6 +295,296 @@ object TableComparer {
     (insertSql, updateSql, deleteSql, keyIndices, valIndices)
   }
 
+  import java.io.{BufferedReader, InputStream, InputStreamReader}
+
+  def extractFailedDiffs(diffs0: Iterator[(Int, DiffRow)],
+                         lastDiffNum: Int,
+                         errDiffNums: InputStream): Iterator[(Int, DiffRow)] = {
+
+    val reader = new BufferedReader(new InputStreamReader(errDiffNums, "UTF-8"))
+
+    new Iterator[(Int, DiffRow)] {
+
+      private var currentDiff: (Int, DiffRow) = null
+      private var hasDiff: Boolean = advanceDiff()
+
+      private var currentFailNum: Int = -1
+      private var hasFail: Boolean = advanceFail()
+
+      private var readyElement: (Int, DiffRow) = null
+      private var isReady: Boolean = false
+      private var closed: Boolean = false
+
+      private def advanceDiff(): Boolean = {
+        if (diffs0.hasNext) {
+          currentDiff = diffs0.next()
+          true
+        } else {
+          currentDiff = null
+          false
+        }
+      }
+
+      private def advanceFail(): Boolean = {
+        var line = reader.readLine()
+        while (line != null) {
+          val trimmed = line.trim
+          if (trimmed.nonEmpty) {
+            currentFailNum = trimmed.toInt
+            return true
+          }
+          line = reader.readLine()
+        }
+        hasFail = false
+        false
+      }
+
+      private def closeReader(): Unit = {
+        if (!closed) {
+          try reader.close() catch { case _: Exception => }
+          closed = true
+        }
+      }
+      override def hasNext: Boolean = {
+        if (isReady) return true
+
+        while (hasDiff) {
+          val diffNum = currentDiff._1
+
+          if (diffNum > lastDiffNum) {
+            readyElement = currentDiff
+            isReady = true
+            hasDiff = advanceDiff()
+            return true
+          }
+
+          if (hasFail) {
+            val failNum = currentFailNum
+            if (diffNum < failNum) {
+              hasDiff = advanceDiff()
+            } else if (diffNum > failNum) {
+              hasFail = advanceFail()
+            } else {
+              readyElement = currentDiff
+              isReady = true
+              hasDiff = advanceDiff()
+              hasFail = advanceFail()
+              return true
+            }
+          } else {
+            hasDiff = advanceDiff()
+          }
+        }
+
+        reader.close()
+        false
+      }
+
+      override def next(): (Int, DiffRow) = {
+        if (!hasNext) {
+          reader.close()
+          throw new NoSuchElementException
+        }
+        val result = readyElement
+        readyElement = null
+        isReady = false
+        result
+      }
+    }
+  }
+
+  // todo :: g3nie
+  def applyChangesWithErr(plan: ComparePlan,
+                          diffs0: Iterator[(Int, DiffRow)],
+                          targetConn: Connection,
+                          cancel: () => Boolean,
+                          onCancel: Int => Unit,
+                          partialCommit: Boolean,
+                          commitSize: Int,
+                          outErrDiffNums: Option[() => java.io.OutputStream],
+                          notice: (Long, Long, Long, Long, Boolean) => Unit,
+                          noticeSkip: (Int, String) => Unit,
+                          debug: Boolean,
+                          batchSize: Int = 512) = {
+
+    val insStmt = targetConn.prepareStatement(plan.insertSql)
+    val updStmt = targetConn.prepareStatement(plan.updateSql)
+    val delStmt = targetConn.prepareStatement(plan.deleteSql)
+
+    targetConn.setAutoCommit(false)
+
+    var insCount, updCount, delCount, skiCount = 0L
+    var processedSinceCommit = 0L
+    var lastRowNum = -1
+
+    // 에러 스트림 lazy open
+    val errStream = outErrDiffNums.map(open => open())
+
+    def closeErrStream(): Unit = {
+      errStream.foreach { s =>
+        try { s.flush(); s.close() } catch { case _: Exception => }
+      }
+    }
+
+    def executeBatchSafe(stmt: PreparedStatement, stmtType: String, diffNums: Seq[Int]): Unit = {
+      try {
+        val results = stmt.executeBatch()
+        results.zip(diffNums).foreach {
+          case (cnt, num) if cnt >= 0 =>
+            stmtType match {
+              case "INS" => insCount += 1
+              case "UPD" => updCount += 1
+              case "DEL" => delCount += 1
+            }
+          case (_, num) =>
+            skiCount += 1
+            noticeSkip(num, stmtType)
+            errStream.foreach(_.write((num.toString + "\n").getBytes("UTF-8")))
+        }
+      } catch {
+        case e: java.sql.BatchUpdateException =>
+          val results = e.getUpdateCounts
+          results.zip(diffNums).foreach {
+            case (cnt, num) if cnt >= 0 =>
+              stmtType match {
+                case "INS" => insCount += 1
+                case "UPD" => updCount += 1
+                case "DEL" => delCount += 1
+              }
+            case (_, num) =>
+              skiCount += 1
+              noticeSkip(num, stmtType)
+              errStream.foreach(_.write((num.toString + "\n").getBytes("UTF-8")))
+          }
+      }
+      processedSinceCommit += diffNums.size
+      if (partialCommit && processedSinceCommit >= commitSize) {
+        targetConn.commit()
+        processedSinceCommit = 0L
+      }
+    }
+
+    try {
+      val valIndices = plan.valIndices
+      val keyIndices = plan.keyIndices
+      val hasLongColumn = valIndices.exists(i =>
+        i._2 == java.sql.Types.LONGVARCHAR || i._2 == java.sql.Types.LONGNVARCHAR
+      )
+
+      val batchNumsIns = scala.collection.mutable.ArrayBuffer[Int]()
+      val batchNumsUpd = scala.collection.mutable.ArrayBuffer[Int]()
+      val batchNumsDel = scala.collection.mutable.ArrayBuffer[Int]()
+
+      val it = diffs0.iterator
+      while (it.hasNext && !cancel()) {
+        val (num, diff) = it.next()
+        lastRowNum = num
+        diff match {
+          case OnlyInA(keys, sourceVals) =>
+            val ai = keyIndices ++ valIndices
+            bindRow(insStmt, keys ++ sourceVals, ai, debug)
+            if (hasLongColumn) {
+              try {
+                val affected = insStmt.executeUpdate()
+                if (affected > 0) insCount += affected else {
+                  skiCount += 1
+                  noticeSkip(num, "INS")
+                  errStream.foreach(_.write((num.toString + "\n").getBytes("UTF-8")))
+                }
+              } catch {
+                case _: Exception =>
+                  skiCount += 1
+                  noticeSkip(num, "INS")
+                  errStream.foreach(_.write((num.toString + "\n").getBytes("UTF-8")))
+              }
+            } else {
+              insStmt.addBatch()
+              batchNumsIns += num
+              if (batchNumsIns.size >= batchSize) {
+                executeBatchSafe(insStmt, "INS", batchNumsIns.toSeq)
+                batchNumsIns.clear()
+                notice(insCount, updCount, delCount, skiCount, false)
+              }
+            }
+
+          case Update(keys, sourceVals) =>
+            val ui = valIndices ++ keyIndices
+            bindRow(updStmt, sourceVals ++ keys, ui, debug)
+            if (hasLongColumn) {
+              try {
+                val affected = updStmt.executeUpdate()
+                if (affected > 0) updCount += affected else {
+                  skiCount += 1
+                  noticeSkip(num, "UPD")
+                  errStream.foreach(_.write((num.toString + "\n").getBytes("UTF-8")))
+                }
+              } catch {
+                case _: Exception =>
+                  skiCount += 1
+                  noticeSkip(num, "UPD")
+                  errStream.foreach(_.write((num.toString + "\n").getBytes("UTF-8")))
+              }
+            } else {
+              updStmt.addBatch()
+              batchNumsUpd += num
+              if (batchNumsUpd.size >= batchSize) {
+                executeBatchSafe(updStmt, "UPD", batchNumsUpd.toSeq)
+                batchNumsUpd.clear()
+                notice(insCount, updCount, delCount, skiCount, false)
+              }
+            }
+
+          case OnlyInB(keys) =>
+            val di = keyIndices
+            bindRow(delStmt, keys, di, debug)
+            delStmt.addBatch()
+            batchNumsDel += num
+            if (batchNumsDel.size >= batchSize) {
+              executeBatchSafe(delStmt, "DEL", batchNumsDel.toSeq)
+              batchNumsDel.clear()
+              notice(insCount, updCount, delCount, skiCount, false)
+            }
+
+          case Same(_) =>
+            skiCount += 1
+            noticeSkip(num, "SAME")
+            if (skiCount % batchSize == 0) {
+              notice(insCount, updCount, delCount, skiCount, false)
+            }
+        }
+      }
+
+      // cancel이 들어온 경우: 마지막 처리 rowNum 콜백
+      if (cancel()) {
+        if (batchNumsIns.nonEmpty) executeBatchSafe(insStmt, "INS", batchNumsIns.toSeq)
+        if (batchNumsUpd.nonEmpty) executeBatchSafe(updStmt, "UPD", batchNumsUpd.toSeq)
+        if (batchNumsDel.nonEmpty) executeBatchSafe(delStmt, "DEL", batchNumsDel.toSeq)
+        targetConn.commit()
+        onCancel(lastRowNum)
+        notice(insCount, updCount, delCount, skiCount, true)
+      } else {
+        // 남은 batch 처리
+        if (batchNumsIns.nonEmpty) executeBatchSafe(insStmt, "INS", batchNumsIns.toSeq)
+        if (batchNumsUpd.nonEmpty) executeBatchSafe(updStmt, "UPD", batchNumsUpd.toSeq)
+        if (batchNumsDel.nonEmpty) executeBatchSafe(delStmt, "DEL", batchNumsDel.toSeq)
+        targetConn.commit()
+        notice(insCount, updCount, delCount, skiCount, true)
+      }
+
+    } catch {
+      case e: Exception =>
+        targetConn.rollback()
+        notice(insCount, updCount, delCount, skiCount, true)
+        oops("[Apply Target Stop]".color(Color.Red).render +
+          s" ${plan.name} last transaction rolled back. Reason: ${e.getMessage}")
+    } finally {
+      insStmt.close()
+      updStmt.close()
+      delStmt.close()
+      closeErrStream()
+    }
+  }
+
   /** ------------------------------ */
   def applyChanges(plan: ComparePlan, diffs: Iterator[DiffRow],
                    targetConn: Connection,
@@ -315,7 +605,6 @@ object TableComparer {
       val hasLongColumn = valIndices.exists(i => i._2 == java.sql.Types.LONGVARCHAR || i._2 == java.sql.Types.LONGNVARCHAR)
 
       val it = diffs.iterator
-      val it0 = diffs
       diffs.foreach {
         // insert -----------
         case OnlyInA(keys, sourceVals) =>

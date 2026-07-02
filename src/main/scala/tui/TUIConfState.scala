@@ -4,11 +4,12 @@ import schema.DBConf.{HikariDataSourceWithConf, displayTo, displayToWith}
 import schema.SchemaCompare.{compareSchemas, fetchSchema, fetchTableNames, jsonCodec}
 import schema.SchemaCompared._
 import schema.{ComparePlan, DBConf, SchemaCompared, TableInfo}
-import tui.SyncTUI.bullet
+import tui.SyncTUI.{bullet, tuiLogger}
 import tui.TUIConfState.{dafaultConf1, defaultConf2}
 import tui.layoutzEx.InputPrompt.{askConfirm, readLineSeq, readNotEmpty}
 import tui.layoutzEx.JPromptShell.RuntimeShellInstance
 import tui.layoutzEx._
+import _root_.table.DiffRow
 import utils.LogHelper.getFileList
 import zio.json.{DecoderOps, EncoderOps}
 
@@ -499,6 +500,8 @@ case class TUIConfState( show: String => Unit, display: String => Unit, inst: Ru
     }
   }
 
+  val no_cancel = () => false
+
   // compare --------------------------------
   def start_ps(n: Option[Int], debug: Boolean = false) {
 
@@ -511,24 +514,54 @@ case class TUIConfState( show: String => Unit, display: String => Unit, inst: Ru
           s1 = ds1,
           s2 = ds2,
           limit = n,
-          cancel = () => false,
+          cancel = no_cancel,
           notice = showRM,
           compDebug = debug)
       }
     }
   }
 
+  def kindFilter(kind: Option[String])
+  : DiffRow => Boolean = kind match {
+    case None => DiffRow.isNotSame
+    case Some(ks) =>
+      val opts = List(
+        Option.when(ks.contains("i"))(DiffRow.isOnlyA  ->("Insert(" + "onlyInA".yellow +")")),
+        Option.when(ks.contains("u"))(DiffRow.isUpdate ->("Update(" + "changed".yellow +")")),
+        Option.when(ks.contains("d"))(DiffRow.isOnlyB  ->("Delete(" + "onlyInB".yellow +")")),
+      ).flatten
+
+      if(opts.isEmpty)
+        DiffRow.isNotSame
+      else {
+        val prefix = bullet + "Operate on " + "selected types only".yellow + ". \n" + bullet + "types: "
+        val msg = opts.map(_._2).mkString(prefix, ", ", "")
+        val ok = askConfirm(inst.term, msg)
+        if (!ok) {
+          DiffRow.isNotSame
+        } else {
+          tuiLogger.info(msg)
+          val fs = opts.map(_._1)
+          (dr: DiffRow) => fs.exists(f => f(dr))
+        }
+      }
+  }
+
+
   // compare & apply ------------------------
-  def start_pa(n: Option[Int], compDebug: Boolean = false, applDebug: Boolean = false , mock: Boolean = false) {
+  def start_pa(n: Option[Int], kind: Option[String] = None, compDebug: Boolean = false, applDebug: Boolean = false , mock: Boolean = false) {
 
     n.foreach( i => show(bullet + s"process first ${i.toString.yellow} entries."))
 
+
     comparedDataSourcesOr.foreach { case (ds1, ds2) =>
       val selected = tuiCon.selectPlans()
+      if(selected.isEmpty) return
+
+      val pred: DiffRow => Boolean = kindFilter(kind)
       if( !mock) {
-        val confirm = askConfirm(inst.term, bullet + "Comparison results may be applied to target.")
-        if(!confirm)
-          return
+        val confirm = askConfirm(inst.term, bullet + "Comparison results will be applied to target.")
+        if(!confirm) return
       }
 
       for (p <- selected) {
@@ -537,8 +570,9 @@ case class TUIConfState( show: String => Unit, display: String => Unit, inst: Ru
           s1 = ds1,
           s2 = ds2,
           limit = n,
-          cancel = () => false,
+          cancel = no_cancel,
           notice = showRM,
+          filterPred =pred,
           compDebug = compDebug,
           applDebug = applDebug)
       }
