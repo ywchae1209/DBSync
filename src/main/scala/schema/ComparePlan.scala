@@ -1,14 +1,17 @@
 package schema
 
+import _root_.table.DiffRow._
+import _root_.table.DiffRowSerDe.{readDiffRows, writeDiffRows}
+import _root_.table.Mockup.MockConnection
 import com.typesafe.scalalogging.Logger
-import schema.ComparePlan.{CancelledException, LimitReachedException, cancelableIt, jobLogger}
+import schema.ComparePlan.cancelableIt
 import schema.SchemaCompared.rowElements
 import table._
-import tui.{Aborted, HasName, ReportMsg, TUITask}
-import tui.{Aborted, Finished, HasName, InProgress, ReportMsg, Stopped, TUITask, TaskStatus}
-import zio.json.{DeriveJsonCodec, JsonCodec}
+import tui.SyncTUI.bullet
 import tui.layoutzEx._
-import DiffRow._
+import tui._
+import utils.Implicits.IterWithZip
+import zio.json.{DeriveJsonCodec, JsonCodec}
 
 import java.time.LocalDateTime
 import javax.sql.DataSource
@@ -21,6 +24,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
                         compRow: CompRow,
                         var mayWhere: Option[String],
                         useLOBHash: Boolean = false ) extends HasName { self =>
+
   val name: String = table.name
 
   def display(callback: String => Unit) = {
@@ -46,32 +50,44 @@ case class ComparePlan( table: TableInfo, // TableInfo,
     callback(output)
   }
 
-  def toCompareApplyTask(s1: DataSource, s2: DataSource, mock: Boolean): TUITask = {
+  def toApplyFromFile(s2: DataSource, path: String, pred: DiffRow => Boolean, mock: Boolean, applDebug: Boolean = false)
+  : TUITask = new TUITask(self.name) {
 
-    new TUITask(name) {
+    override def go(cancel: () => Boolean, notice: ReportMsg => Unit) : Unit = {
+
+      val it0 = readDiffRows(path)
+
+      it0 match {
+        case Left(e)   => notice( ReportMsgAbort(self.name, s"read fail ${path.green} : ${e.getMessage}"))
+        case Right(it) =>
+          val con = if(mock) MockConnection() else s2.getConnection
+          try{
+            DiffApplier(self, debug = applDebug).applyChangesWithErr(it.filter(pred).zipIndexFrom(1), con, notice, cancel) // cancel
+          } finally {
+            it.close()
+            con.close()
+          }
+      }
+    }
+  }
+
+  def toCompareApplyTask(s1: DataSource, s2: DataSource, mock: Boolean)
+  : TUITask = {
+
+    new TUITask(self.name) {
       override def go(cancel: () => Boolean, notice: ReportMsg => Unit): Unit = {
 
-        val reportIt = makeReportIt(notice)
-        val reportAp = makeReportAp(notice)
-        val comp = new TableComparer(self, false)
-
-        val it0 = comp.compareIt(s1, s2, reportIt)
-        val it = cancelableIt(it0, cancel, None)
-        val filtered = it.filterNot(_.isInstanceOf[Same])
-        val con = if(mock) new Mockup.LoggingConnection else s2.getConnection
+        val comp = TableComparer(self)
+        val it0 = comp.compareIt(s1, s2, notice)
+        val con = if(mock) MockConnection() else s2.getConnection
 
         try{
-          TableComparer.applyChanges(
-            self,
-            filtered,
-            con,
-            reportAp,
-            debug= false)
-
+          val appl = DiffApplier(self)
+          appl.applyChangesWithErr( it0.filterNot(_.isSame).zipIndexFrom(1), con, notice, cancel)    // cancel
         }
         finally {
-          con.close()
           it0.close()
+          con.close()
         }
       }
     }
@@ -84,103 +100,50 @@ case class ComparePlan( table: TableInfo, // TableInfo,
     this.mayWhere = mayWhere
   }
 
-  def toCompareToFile(s1: DataSource, s2: DataSource, path: String): TUITask = {
+  def toCompareToFile(s1: DataSource, s2: DataSource, path: String)
+  : TUITask = new TUITask(self.name) {
 
-    import DiffRowSerDe.writeDiffRows
+    override def go(cancel: () => Boolean, notice: ReportMsg => Unit): Unit = {
 
-    new TUITask(table.name) {
-      override def go(cancel: () => Boolean, notice: ReportMsg => Unit): Unit = {
+      val comp = TableComparer(self)
+      val it0 = comp.compareIt(s1, s2, notice)
 
-        val reportIt = makeReportIt(notice)
-        val comp = new TableComparer(self, false)
-
-        val it0 = comp.compareIt(s1, s2, reportIt)
-        val it = cancelableIt(it0, cancel, None)
-        val filtered = it.filterNot(_.isInstanceOf[Same])
-        try{
-          val done = writeDiffRows(table.name, path, filtered, cancel, notice)
-          done match {
-            case Left(e) => notice(ReportMsg(table.name, s"[Write Abort] ${e.getMessage}", Aborted))
-            case Right(l) => notice(ReportMsg(table.name, s"[Write Done] diff.total = $l", Finished))
-          }
-        } finally {
-          it0.close()
-        }
+      try{
+        writeDiffRows(self.name, path, it0.filterNot(_.isSame), cancel, notice)
+      } finally {
+        it0.close()
       }
     }
   }
 
-  def toApplyFromFile(s2: DataSource, path: String, pred: DiffRow => Boolean, mock: Boolean, applDebug: Boolean = false): TUITask = {
+  def goApply(s2: DataSource,
+              it: Iterator[(Int, DiffRow)],
+              notice: ReportMsg => Unit,
+              mock: Boolean = false,
+              applDebug: Boolean = false
+             ): Unit = {
 
-    import DiffRowSerDe.readDiffRows
-
-    new TUITask(table.name) {
-      override def go(cancel: () => Boolean, notice: ReportMsg => Unit): Unit = {
-
-        val reportAp = makeReportAp(notice)
-        val con = if(mock) new Mockup.LoggingConnection else s2.getConnection
-        try{
-          val it0 = readDiffRows(table.name, path, cancel, notice)
-          val done = it0.map( it =>
-            TableComparer.applyChanges( self, it.filter(pred), con, reportAp, debug= applDebug)
-          )
-          done match {
-            case Left(e) => //notice(ReportMsg(name, s"[Apply Abort] ${e.getMessage}", Aborted))
-            case Right(_) => //notice(ReportMsg(name, s"[Apply Done] diff.total = $l", Finished))
-          }
-        } finally {
-          con.close()
-        }
-      }
+    val con = if(mock) MockConnection() else s2.getConnection
+    try{
+      val appl = DiffApplier(this, debug = applDebug)
+      appl.applyChangesWithErr( it, con, notice, () => false)
+    } finally {
+      con.close()
     }
-
   }
-
-  def makeReportIt(notice: ReportMsg => Unit)
-  =
-    (r1:Long, r2:Long, s:Long, u:Long, a:Long, b:Long, m: String, fin: Boolean) => {
-      val msg =
-        if (fin) s"match : $m ra:$r1 rb:$r2 sa:$s ".color(Color.Yellow).render + s"up:$u oa:$a ob:$b".color(Color.Green).render
-        else s"match : $m ra:$r1 rb:$r2 sa:$s up:$u oa:$a ob:$b"
-
-      val rm = ReportMsg(name, msg, if (fin) Finished else InProgress)
-      notice(rm)
-      jobLogger.info(rm.statusString)
-    }
-
-  def makeReportAp(notice: ReportMsg => Unit)
-  = (ic: Long, uc: Long, dc: Long, sc: Long, fin: Boolean) => {
-    val msg =
-      if(fin) (s"apply :  in:$ic up:$uc de:$dc sa:$sc".color(Color.Yellow).render)
-      else    (s"apply :  in:$ic up:$uc de:$dc sa:$sc")
-
-    val rm = ReportMsg(name, msg, if (fin) Finished else InProgress)
-    notice(rm)
-    jobLogger.info(rm.statusString)
-  }
-
 
   def goCompare(s1: DataSource, s2: DataSource,
                 limit: Option[Int],
-                cancel: () => Boolean,
                 notice: ReportMsg => Unit,
                 compDebug: Boolean = false): Unit = {
 
-    val reportIt: (Long, Long, Long, Long, Long, Long, String, Boolean) => Unit =
-      makeReportIt(notice)
 
-    val comp = new TableComparer(this, compDebug)
-    val it0 = comp.compareIt(s1, s2, reportIt)
-    val it = cancelableIt(it0, cancel, limit)
+    val comp = TableComparer(this, isDebug = compDebug)
+    val it0 = comp.compareIt(s1, s2, notice)
     try {
-      while (it.hasNext) {
-        it.next()
-      }
-    } catch {
-      case e: CancelledException => reportIt(0,0,0,0,0,0, "cancelled at " + e.at.toString, true)
-//      case e: LimitReachedException => reportIt(0,0,0,0,0,0, "limit reached " + e.n, true)
-      case e: Throwable => reportIt(0,0,0,0,0,0, s"failed: ${e.getMessage}", true)
-        throw e
+      val it = cancelableIt(it0, () => false, limit, this.name, notice)
+      it.size
+    } catch { case e: Throwable =>
     } finally {
       it0.close()
     }
@@ -189,25 +152,21 @@ case class ComparePlan( table: TableInfo, // TableInfo,
   def goCompareApply(s1: DataSource,
                      s2: DataSource,
                      limit: Option[Int],
-                     cancel: () => Boolean,
                      notice: ReportMsg => Unit,
                      filterPred: DiffRow => Boolean = isNotSame,
+                     mock: Boolean = false,
                      compDebug: Boolean = false,
                      applDebug: Boolean = false) = {
 
-    val reportIt = makeReportIt(notice)
-    val reportAp = makeReportAp(notice)
-
-    val comp = new TableComparer(this, compDebug)
-    val it0 = comp.compareIt(s1, s2, reportIt)
-    val it = cancelableIt(it0, cancel, limit)
-    val filtered = it.filter(filterPred)
-    val con = if(applDebug) new Mockup.LoggingConnection else s2.getConnection
+    val comp = TableComparer(this, isDebug = compDebug)
+    val it0 = comp.compareIt(s1, s2, notice)
+    val con = if(mock) MockConnection() else s2.getConnection
 
     try{
-      TableComparer.applyChanges( this, filtered, con,
-        reportAp,
-        debug= applDebug)
+      val it = cancelableIt(it0, () => false, limit, this.name, notice)
+      val appl = DiffApplier(this, debug = applDebug)
+      appl.applyChangesWithErr( it.filter(filterPred).zipIndexFrom(1), con, notice, () => false)
+
     } finally {
       con.close()
       it0.close()
@@ -236,7 +195,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
     (comp, l.colA, l.colB)
   }
 
-  val (insertSql, updateSql, deleteSql, keyIndices, valIndices) = TableComparer.sqlForApply(this)
+  val (insertSql, updateSql, deleteSql, keyIndices, valIndices) = DiffApplier.sqlForApply(this)
 
 }
 
@@ -293,10 +252,12 @@ object ComparePlan {
   case class CancelledException(at: LocalDateTime) extends RuntimeException(s"cancelled at $at")
   case class LimitReachedException(n: Int) extends RuntimeException(s"reached to limit $n")
 
-  def cancelableIt[A](it: Iterator[A] with AutoCloseable,
+  def cancelableIt[A](it: Iterator[A],
                       cancel: () => Boolean,
-                      limit: Option[Int]
-                       ) : Iterator[A]
+                      limit: Option[Int],
+                      name: String,
+                      notice: ReportMsg => Unit,
+                      ) : Iterator[A]
   = new Iterator[A] {
     val nlimit = limit.getOrElse(0)
     var n = 1
@@ -305,11 +266,11 @@ object ComparePlan {
 
     override def next(): A = {
       if(cancel()) {
-        it.close()
+        notice( ReportMsgStop(name, bullet + s"canceled by user( processed = ${n.toString.green})") )
         throw CancelledException(LocalDateTime.now())
       }
       if(nlimit != 0 && n >= nlimit) {
-        it.close()
+        notice( ReportMsgStop(name, bullet + s"limit reached(${n.toString.green})") )
         throw LimitReachedException(n)
       }
       n += 1

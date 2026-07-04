@@ -447,7 +447,6 @@ case class TUIConfState( show: String => Unit, display: String => Unit, inst: Ru
   def save(path: String = ".", pname: Option[String] = None) = tuiCon.save(path, pname)
   def load(path: String = ".", pname: Option[String] = None) = tuiCon.load(path, pname)
   def load0(path: String = ".", pname: Option[String] = None): Option[SchemaCompared] = tuiCon.load0(path, pname)
-//  def dataSourcesOr: Option[(DataSource, DataSource)] = tuiCon.dataSourcesOr
   def comparedDataSourcesOr: Option[(DataSource, DataSource)] = tuiCon.comparedDataSourcesOr
   // --------------------------------------------------------------------------------
 
@@ -514,7 +513,6 @@ case class TUIConfState( show: String => Unit, display: String => Unit, inst: Ru
           s1 = ds1,
           s2 = ds2,
           limit = n,
-          cancel = no_cancel,
           notice = showRM,
           compDebug = debug)
       }
@@ -547,12 +545,18 @@ case class TUIConfState( show: String => Unit, display: String => Unit, inst: Ru
       }
   }
 
+  def start_fa() = {
+
+    comparedDataSourcesOr.foreach { case (_, ds2) =>
+      // todo :: g3nie
+
+    }
+  }
 
   // compare & apply ------------------------
   def start_pa(n: Option[Int], kind: Option[String] = None, compDebug: Boolean = false, applDebug: Boolean = false , mock: Boolean = false) {
 
     n.foreach( i => show(bullet + s"process first ${i.toString.yellow} entries."))
-
 
     comparedDataSourcesOr.foreach { case (ds1, ds2) =>
       val selected = tuiCon.selectPlans()
@@ -570,9 +574,9 @@ case class TUIConfState( show: String => Unit, display: String => Unit, inst: Ru
           s1 = ds1,
           s2 = ds2,
           limit = n,
-          cancel = no_cancel,
           notice = showRM,
-          filterPred =pred,
+          filterPred = pred,
+          mock = mock,
           compDebug = compDebug,
           applDebug = applDebug)
       }

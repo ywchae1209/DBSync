@@ -3,7 +3,7 @@ package tui.layoutzEx
 import org.jline.terminal.Terminal
 import org.jline.utils.{AttributedString, Display, Status}
 
-import scala.collection.JavaConverters.seqAsJavaListConverter
+import scala.jdk.CollectionConverters._
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
 import scala.io.Source

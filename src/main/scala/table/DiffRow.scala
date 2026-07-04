@@ -1,12 +1,17 @@
 package table
 
+import tui.ReportMsgStop
+import tui.TaskStatus._
 import tui.layoutzEx.StringWithColor
+
+import scala.util.Try
 
 sealed trait DiffRow {
 
   def isInsert = DiffRow.isOnlyA(this)
   def isUpdate = DiffRow.isUpdate(this)
   def isDelete = DiffRow.isOnlyB(this)
+  def isSame   = DiffRow.isSame(this)
 
   def keys: List[CVal]
   def serialize = DiffRowSerDe.serialize(this)
@@ -67,34 +72,25 @@ import oracle.spatial.util.WKB
 import org.msgpack.core.{MessagePack, MessagePacker, MessageUnpacker}
 import table.LongCollection.LongBytes.fromBytes
 import table.LongCollection.LongString.fromString
-import tui.{ReportMsg, Stopped}
+import tui.ReportMsg
 
 import java.io.ByteArrayOutputStream
-import scala.util.Try
 
 object DiffRowSerDe {
 
-  import java.io.FileOutputStream
-  import java.io.FileInputStream
+  import java.io.{FileInputStream, FileOutputStream}
   import scala.util.Using
-  def readDiffRows(
-                    name: String,
-                    path: String,
-                    cancel: () => Boolean,
-                    callback: ReportMsg => Unit
-                  ): Either[Throwable, Iterator[DiffRow]] = {
+
+  def readDiffRows( path: String ) = {
     Try {
       val fis = new FileInputStream(path)
       val unpacker: MessageUnpacker = MessagePack.newDefaultUnpacker(fis)
 
-      new Iterator[DiffRow] {
-        private var nextRow: Option[DiffRow] = fetchNext()
+      new Iterator[DiffRow] with AutoCloseable {
 
+        private var nextRow: Option[DiffRow] = fetchNext()
         private def fetchNext(): Option[DiffRow] = {
-          if (cancel()) {
-            callback(ReportMsg(name, s"[Read Stopped] $path by user", Stopped))
-            None
-          } else if (unpacker.hasNext) {
+          if (unpacker.hasNext) {
             val out = unpackDiffRow(unpacker)
             Some(out)
           } else {
@@ -102,19 +98,18 @@ object DiffRowSerDe {
             None
           }
         }
-
         override def hasNext: Boolean = nextRow.isDefined
-
         override def next(): DiffRow = {
           val current = nextRow.get
           nextRow = fetchNext()
           current
         }
+        override def close(): Unit = fis.close()
       }
     }.toEither
   }
 
-  def writeDiffRows(name: String ,path: String, rows: Iterator[DiffRow],
+  def writeDiffRows(name: String, path: String, rows: Iterator[DiffRow],
                     cancel: () => Boolean, callback: ReportMsg => Unit)
   : Either[Throwable, Long] = {
     Using(new FileOutputStream(path)) { fos =>
@@ -124,7 +119,7 @@ object DiffRowSerDe {
         rows.foreach { row =>
           if(cancel()) {
             packer.flush()
-            callback( ReportMsg(name, s"[Write Stopped] $path (written: $total) by user", Stopped) )
+            callback( ReportMsgStop(name, s"[Write Stopped] $path (written: $total) by user") )
             return Right(total)
           }
           total = total + 1

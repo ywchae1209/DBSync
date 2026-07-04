@@ -41,8 +41,6 @@ case class SchemaCompared( conf1: DBConf,
         cp.setWhere(Some(where))
     }
   }
-
-
 }
 
 object SchemaCompare {

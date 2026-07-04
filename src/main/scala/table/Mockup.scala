@@ -11,7 +11,7 @@ import java.{sql, util}
 
 object Mockup {
 
-  class LoggingPreparedStatement extends PreparedStatement {
+  case class MockPreparedStatement() extends PreparedStatement {
 
     def log(msg: String): Unit = jobLogger.info(s"\t\t[Mock.Stmt] $msg")
 
@@ -278,11 +278,11 @@ object Mockup {
     }
   }
 
-  class LoggingConnection extends Connection {
+  case class MockConnection() extends Connection {
 
     def log(msg: String): Unit = jobLogger.info(s"\t\t[Mock.Conn] $msg")
 
-    private val stmt = new LoggingPreparedStatement
+    private val stmt = MockPreparedStatement()
 
     override def abort(executor: Executor): Unit = log(s"abort(executor=$executor)")
 

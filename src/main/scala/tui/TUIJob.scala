@@ -3,33 +3,30 @@ package tui
 import org.jline.utils.AttributedString
 import tui.SyncTUI.bullet
 import tui.layoutzEx.JPromptShell.{RuntimeShellInstance, TUIBarStates}
-import tui.layoutzEx.{Color, _}
+import tui.layoutzEx._
 import zio._
 
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import scala.Console.println
-
 import scala.collection.convert.ImplicitConversions.`map AsScala`
 import scala.collection.mutable
 
 // --------------------------------------------------------------------------------
+import tui.TaskStatus._
 sealed trait TaskStatus {
   def isDone = this match {
     case _: Done => true
     case _ => false
   }
 }
-case object Ready    extends TaskStatus
-case object InProgress    extends TaskStatus
-case object Started  extends TaskStatus
-sealed trait Done     extends TaskStatus
-case object Stopped  extends Done
-case object Aborted   extends Done
-case object Finished extends Done
-
-case class ReportMsg(name: String, msg: String, state: TaskStatus = Ready) {
-  def statusString = f"${name.take(32)}%-32s $state%-10s $msg"
+object TaskStatus {
+  case object Ready    extends TaskStatus
+  case object InProc    extends TaskStatus
+  sealed trait Done     extends TaskStatus
+    case object Stop  extends Done
+    case object Abort   extends Done
+    case object Fin extends Done
 }
 
 // --------------------------------------------------------------------------------
@@ -58,7 +55,7 @@ case class JobTUIBarStates(report: ReportMsg => Unit) extends TUIBarStates {
 
   override def getStatusMsg(): List[AttributedString]
   = {
-    val notDone = runningState.toMap.filterNot(_._2.state.isDone )
+    val notDone = runningState.toMap.filterNot(_._2.status.isDone )
     val r = notDone.values.map(rm => AttributedString.fromAnsi(rm.statusString)).toList
     r
   }
@@ -167,7 +164,7 @@ case class RunningTasks(
   private def workerLoop: UIO[Unit] = {
     (for {
       task <- taskQue.take
-      _ = runningState.reportToMe(ReportMsg(task.name, "wait for start.."))
+      _ = runningState.reportToMe(ReportMsgTime(task.name, "wait for start.."))
       cancelFlag = new AtomicBoolean(false)
       effect = ZIO.attemptBlockingInterrupt {
         val cancel = () => cancelFlag.get()
@@ -320,7 +317,7 @@ case class TUIJob[A<:HasName]( show: String => Unit,
       } yield (currentJob)
   }
 
-  import zio.{Runtime, Unsafe, _}
+  import zio.{Unsafe, _}
 
   def startAsync(f: A => TUITask, threadCount: Int = 2): Option[RunningTasks] = {
     Unsafe.unsafe { implicit u =>
