@@ -10,7 +10,7 @@ object Implicits {
   }
 
   implicit class IterWithZip[A] (it: Iterator[A]) {
-    def zipIndexFrom( start: Int = 1): Iterator[(Int, A)]
+    def zipIndexFrom( start: Int): Iterator[(Int, A)]
     = new Iterator[(Int, A)] {
       private var idx = start
       override def hasNext: Boolean = it.hasNext

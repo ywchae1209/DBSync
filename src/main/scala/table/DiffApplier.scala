@@ -14,17 +14,17 @@ import java.io.{BufferedReader, InputStream, InputStreamReader, StringReader}
 import java.sql.{Connection, PreparedStatement, Statement, Types}
 
 case class DiffApplier( plan: ComparePlan,
-                        partialCommit: Boolean = false,
+                        partialCommit: Boolean = true,
                         commitSize: Int = 1024,
                         debug: Boolean = false,
                         batchSize: Int = 512 ) {
 
 
-  def applyChangesWithErr(diffs: Iterator[(Int, DiffRow)],
-                          conn: Connection,
-                          notice: ReportMsg => Unit,
-                          cancel: () => Boolean,
-                          outDiffNums: Option[() => java.io.OutputStream] = None) = {
+  def applyChange(diffs: Iterator[(Int, DiffRow)],
+                  conn: Connection,
+                  notice: ReportMsg => Unit,
+                  cancel: () => Boolean,
+                  outDiffNums: Option[() => java.io.OutputStream] = None) = {
 
     def onCancel(cp: Int) = noticeWithLog(notice){
       ReportMsgApCancel(plan.name, cp)
@@ -218,107 +218,6 @@ case class DiffApplier( plan: ComparePlan,
     }
   }
 
-
-  /** ------------------------------ */
-  def applyChanges(diffs: Iterator[DiffRow],
-                   conn: Connection,
-                   notice: ReportMsg => Unit) = {
-
-    def report(ic: Long, uc: Long, dc: Long, sc: Long, fin: Boolean) = noticeWithLog(notice){
-      ReportMsgAp(plan.name, ic, uc, dc, sc, 0, 0, 0, if(fin) Fin else InProc)
-    }
-
-    val insStmt = conn.prepareStatement(plan.insertSql)
-    val updStmt = conn.prepareStatement(plan.updateSql)
-    val delStmt = conn.prepareStatement(plan.deleteSql)
-
-    conn.setAutoCommit(false)
-
-    var iCount, uCount, dCount, sCount = 0L
-
-    try {
-      val valIndices = plan.valIndices
-      val keyIndices = plan.keyIndices
-      val hasLongColumn = valIndices.exists(i => i._2 == java.sql.Types.LONGVARCHAR || i._2 == java.sql.Types.LONGNVARCHAR)
-
-      val it = diffs.iterator
-      diffs.foreach {
-        // insert -----------
-        case OnlyInA(keys, sourceVals) =>
-          val ai = keyIndices ++ valIndices
-          bindRow(insStmt, keys ++ sourceVals, ai, debug)
-          if (hasLongColumn) {
-            insStmt.executeUpdate()
-            iCount += 1
-            if (iCount % batchSize == 0) report(iCount, uCount, dCount, sCount, false)
-          } else {
-            insStmt.addBatch()
-            iCount += 1
-            if (iCount % batchSize == 0) {
-              insStmt.executeBatch()
-              report(iCount, uCount, dCount, sCount, false)
-            }
-          }
-
-        // update -----------
-        case Update(keys, sourceVals) =>
-          val ui = valIndices ++ keyIndices
-          bindRow(updStmt, sourceVals ++ keys, ui, debug)
-          if (hasLongColumn) {
-            updStmt.executeUpdate()
-            uCount += 1
-            if (uCount % batchSize == 0) report(iCount, uCount, dCount, sCount, false)
-          }
-          else {
-            updStmt.addBatch()
-            uCount += 1
-            if (uCount % batchSize == 0) {
-              updStmt.executeBatch()
-              report(iCount, uCount, dCount, sCount, false)
-            }
-          }
-
-        // delete -----------
-        case OnlyInB(keys) =>
-          val di = keyIndices
-          bindRow(delStmt, keys, di, debug)
-          delStmt.addBatch()
-          dCount += 1
-          if (dCount % batchSize == 0) {
-            delStmt.executeBatch()
-            report(iCount, uCount, dCount, sCount, false)
-          }
-
-        case Same(_) =>
-          sCount += 1
-          if (sCount % batchSize == 0) {
-            report(iCount, uCount, dCount, sCount, false)
-          }
-      }
-
-      // remains ------------------------
-      if (!hasLongColumn) {
-        if (iCount % batchSize != 0) insStmt.executeBatch()
-        if (uCount % batchSize != 0) updStmt.executeBatch()
-      }
-      if (dCount % batchSize != 0) delStmt.executeBatch()
-
-      conn.commit()
-      report(iCount, uCount, dCount, sCount, true)
-
-    } catch {
-      case e: Exception =>
-        report(iCount, uCount, dCount, sCount, true)
-        conn.rollback()
-        // todo :: g3nie
-        oops("[Apply Target Stop]".red + s" ${plan.name} last transaction rolled back. Reason: ${e.getMessage}")
-    } finally {
-      insStmt.close()
-      updStmt.close()
-      delStmt.close()
-    }
-  }
-
 }
 
 
@@ -470,144 +369,6 @@ object DiffApplier {
     }
   }
 
-  def bindRow0(stmt: PreparedStatement,
-              values: List[CVal],
-              indices: List[(String, Int, String)],
-              debug: Boolean): Unit = {
-
-    var paramIdx = 1
-    val it = values.iterator
-    val it0 = indices.iterator
-
-    while (it.hasNext && it0.hasNext) {
-      val cval = it.next()
-      val (cname, ctype, tname) = it0.next()
-
-      def log(action: => String): Unit
-      = {
-        if (debug) memo(s"[BIND] idx=$paramIdx ($cname:$ctype:$tname) -> $action")
-      }
-
-
-      cval match {
-
-        case a: CVOrderable => a match {
-          case CInt(_, value) => log(s"setInt($value)")
-            stmt.setInt(paramIdx, value)
-
-          case CLong(_, value) => log(s"setLong($value)")
-            stmt.setLong(paramIdx, value)
-
-          case CBigInt(_, value) => log(s"setBigDecimal(${value.bigInteger})")
-            stmt.setBigDecimal(paramIdx, new java.math.BigDecimal(value.bigInteger))
-
-          case CDouble(_, value) => log(s"setDouble($value)")
-            stmt.setDouble(paramIdx, value)
-
-          case CDecimal(_, value) => log(s"setBigDecimal($value)")
-            stmt.setBigDecimal(paramIdx, value.bigDecimal)
-
-          case CString(_, value) => log(s"setString($value)")
-            stmt.setString(paramIdx, value)
-
-          case CDate(_, value) => log(s"setDate($value)")
-            stmt.setDate(paramIdx, java.sql.Date.valueOf(value))
-
-          case CTime(_, value) => log(s"setTime($value)")
-            stmt.setTime(paramIdx, java.sql.Time.valueOf(value))
-
-          case CTimestamp(_, value) => log(s"setTimestamp($value)")
-            stmt.setTimestamp(paramIdx, java.sql.Timestamp.valueOf(value))
-
-          case COffsetTime(_, value) => log(s"setObject(OffsetTime=$value)")
-            stmt.setObject(paramIdx, value)
-
-          case COffsetTimestamp(_, value) => log(s"setObject(OffsetTimestamp=$value)")
-            stmt.setObject(paramIdx, value)
-        }
-
-        case a: CVEquatable => a match {
-
-          case CBoolean(_, value) => log(s"setBoolean($value)")
-            stmt.setBoolean(paramIdx, value)
-
-          case CBytes(_, value) => log(s"setBytes(${value.length})")
-            stmt.setBytes(paramIdx, value)
-
-          case x: CLongString =>
-            val str = x.longString.makeString
-            if (ctype == Types.LONGVARCHAR || ctype == Types.LONGNVARCHAR) {
-              val reader = new java.io.StringReader(str)
-              log(s"setCharacterStream(len=${str.length})")
-              stmt.setCharacterStream(paramIdx, reader, str.length)
-            } else {
-              val reader = new StringReader(str)
-              log(s"setClob(len=${str.length})")
-              stmt.setClob(paramIdx, reader, str.length)
-            }
-
-          case x: CLongBytes =>
-            val bytes = x.longBytes.makeBytes
-            val is = new java.io.ByteArrayInputStream(bytes)
-            log(s"setBinaryStream(len=${bytes.length})")
-            stmt.setBinaryStream(paramIdx, is, bytes.length)
-
-          case x: COraGeometry =>
-            val conn = stmt.getConnection
-            val ora = conn.unwrap(classOf[OracleConnection])
-            val struct =
-              if (x.value != null) {
-                log("toStruct + setObject(STRUCT)")
-                oracle.spatial.geometry.JGeometry.storeJS(x.value, ora)
-              } else {
-                log("null geometry → setObject(null, STRUCT)")
-                null
-              }
-            stmt.setObject(paramIdx, struct, java.sql.Types.STRUCT)
-
-          case CInterval(_, value) =>
-            log(s"setString(INTERVAL=$value)")
-            stmt.setString(paramIdx, value)
-
-          case CXML(_, value) =>
-            log(s"setString(XMLString=$value)")
-            stmt.setString(paramIdx, value)
-        }
-
-        case a: CVIncomparable => a match {
-
-          case CRowID(_, value) => log(s"setString(ROWID=$value)")
-            stmt.setString(paramIdx, value)
-
-          case CBFile(_, value) => log(s"setString(BFILE=$value)")
-            stmt.setString(paramIdx, value)
-
-          case CNull(_) =>
-            ctype match {
-              case Types.OTHER =>
-                if (tname == "MDSYS.SDO_GEOMETRY") { // idiot oracle
-                  log("setNull(STRUCT, MDSYS.SDO_GEOMETRY)")
-                  stmt.setNull(paramIdx, Types.STRUCT, "MDSYS.SDO_GEOMETRY")
-                } else {
-                  log("setObject(null) [OTHER]")
-                  stmt.setObject(paramIdx, null)
-                }
-
-              case Types.STRUCT => log("setNull(STRUCT)")
-                stmt.setNull(paramIdx, Types.STRUCT)
-
-              case _ => log(s"setNull($ctype)")
-                stmt.setNull(paramIdx, ctype)
-            }
-
-          case CNotSupport(_, jdbcType) =>
-            throw new IllegalArgumentException(s"[bindRow: not support] idx=$paramIdx col=$cname jdbcType=$jdbcType")
-        }
-      }
-      paramIdx += 1
-    }
-  }
-
   def sqlForApply(plan: ComparePlan) = {
 
     def typeName(name: String): String =
@@ -671,73 +432,6 @@ object DiffApplier {
     (insertSql, updateSql, deleteSql, keyIndices, valIndices)
   }
 
-  def sqlForApply0(plan: ComparePlan) = {
-
-    def typeName(name: String): String =
-      Option(name).map(_.toUpperCase match {
-        case n if n.endsWith("SDO_GEOMETRY") => "MDSYS.SDO_GEOMETRY"
-        case "LONG" => "LONG"
-        case "LONG RAW" => "LONG RAW"
-        case other => other
-      }).orNull
-
-
-    def typeCode(jdbcType: Int, name: String): Int = {
-
-      val upper = Option(typeName(name)).map(_.toUpperCase)
-
-      upper match {
-        case Some(n) if n.endsWith("SDO_GEOMETRY") => Types.STRUCT
-        case Some("LONG") => Types.LONGVARCHAR
-        case Some("LONG RAW") => Types.LONGVARBINARY
-        case _ => jdbcType
-      }
-    }
-
-    val tableName = plan.table.name
-    val fullTableName = plan.table.schema.map(_ + ".").getOrElse("") + tableName
-
-    val keyNames = plan.compRow.sortKey.map(_.name)
-    val keyIndices = keyNames.map { name =>
-      plan.sourceReaders.find(_.name == name).map((r: CReader) => // CReader.isNullable : Boolean
-        (r.name, typeCode(r.jdbcType, r.typeName), typeName(r.typeName))).getOrElse(
-        throw new IllegalStateException(
-          s"[Meta Mapping Error] PK Column '$name' defined in ComparePlan was not found in the source SELECT query (CReader list). " +
-            s"Please check if the SELECT query contains this PK column."
-        )
-      )
-    }
-    val valNames = plan.compRow.compCols.filterNot(_.isVirtual).map(_.name) ++ plan.compRow.compLobs.map(_.name)
-    val valIndices = valNames.map { name =>
-      plan.sourceReaders.find(_.name == name).map((r: CReader) => (r.name, typeCode(r.jdbcType, r.typeName), typeName(r.typeName))).getOrElse(
-        throw new IllegalStateException(
-          s"[Meta Mapping Error] Physical Column '$name' defined in ComparePlan was not found in sourceReaders. " +
-            s"Please check if the column name is misspelled or missing in sourceReaders."
-        )
-      )
-    }
-
-
-    def toValuesPlaceholders(colNames: Seq[String]): String = {
-      colNames.map(_ => "?").mkString(", ")
-    }
-
-    def toUpdatePlaceholders(colNames: Seq[String]): String = {
-      colNames.map(name => s"$name = ?").mkString(", ")
-    }
-
-    def toWherePlaceholders(colNames: Seq[String]): String = {
-      colNames.map(name => s"$name = ?").mkString(" AND ")
-    }
-
-    val insertSql = s"INSERT INTO $fullTableName (${(keyNames ++ valNames).mkString(", ")}) VALUES (${toValuesPlaceholders(keyNames ++ valNames)})"
-    val updateSql = s"UPDATE $fullTableName SET ${toUpdatePlaceholders(valNames)} WHERE ${toWherePlaceholders(keyNames)}"
-    val deleteSql = s"DELETE FROM $fullTableName WHERE ${toWherePlaceholders(keyNames)}"
-
-    (insertSql, updateSql, deleteSql, keyIndices, valIndices)
-  }
-
-
   // --------------------------------------------------------------------------------
 
   /**
@@ -746,8 +440,8 @@ object DiffApplier {
    * 2. lastDiffNum보다 큰 번호의 값도 모두 diffs에서 꺼내야 한다.
    */
   def extractDiffs(diffs: Iterator[(Int, DiffRow)],
-                   lastDiffNum: Int,
-                   diffNums: InputStream ): Iterator[(Int, DiffRow)] = {
+                   diffNums: InputStream,
+                   lastDiffNum: Option[Int] = None ): Iterator[(Int, DiffRow)] = {
 
     val reader = new BufferedReader(new InputStreamReader(diffNums, "UTF-8"))
 
@@ -802,7 +496,7 @@ object DiffApplier {
         while (hasDiff) {
           val diffNum = currentDiff._1
 
-          if (diffNum > lastDiffNum) {
+          if(lastDiffNum.exists( diffNum > _)) {
             readyElement = currentDiff
             isReady = true
             hasDiff = advanceDiff()

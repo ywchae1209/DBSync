@@ -545,14 +545,6 @@ case class TUIConfState( show: String => Unit, display: String => Unit, inst: Ru
       }
   }
 
-  def start_fa() = {
-
-    comparedDataSourcesOr.foreach { case (_, ds2) =>
-      // todo :: g3nie
-
-    }
-  }
-
   // compare & apply ------------------------
   def start_pa(n: Option[Int], kind: Option[String] = None, compDebug: Boolean = false, applDebug: Boolean = false , mock: Boolean = false) {
 

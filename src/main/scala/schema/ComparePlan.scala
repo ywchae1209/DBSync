@@ -13,6 +13,7 @@ import tui._
 import utils.Implicits.IterWithZip
 import zio.json.{DeriveJsonCodec, JsonCodec}
 
+import java.io.FileOutputStream
 import java.time.LocalDateTime
 import javax.sql.DataSource
 
@@ -50,21 +51,28 @@ case class ComparePlan( table: TableInfo, // TableInfo,
     callback(output)
   }
 
-  def toApplyFromFile(s2: DataSource, path: String, pred: DiffRow => Boolean, mock: Boolean, applDebug: Boolean = false)
+  def toApplyFromFile(s2: DataSource, path: String,
+                      pred: DiffRow => Boolean = _.isNotSame,
+                      offset: Option[Int] = None,
+                      mock: Boolean = false,
+                      applDebug: Boolean = false)
   : TUITask = new TUITask(self.name) {
 
     override def go(cancel: () => Boolean, notice: ReportMsg => Unit) : Unit = {
 
       val it0 = readDiffRows(path)
-
       it0 match {
         case Left(e)   => notice( ReportMsgAbort(self.name, s"read fail ${path.green} : ${e.getMessage}"))
-        case Right(it) =>
-          val con = if(mock) MockConnection() else s2.getConnection
+        case Right(i) =>
+          val (con, os) =
+            if(mock) (MockConnection() -> None)
+            else (s2.getConnection -> Some(() => (new FileOutputStream(path + ".dat"))))
           try{
-            DiffApplier(self, debug = applDebug).applyChangesWithErr(it.filter(pred).zipIndexFrom(1), con, notice, cancel) // cancel
+            val it = i.zipIndexFrom(1).drop(offset.getOrElse(0))
+            val appl = DiffApplier(self, debug = applDebug)
+            appl.applyChange(it.filter(r => pred(r._2)), con, notice, cancel, outDiffNums = os)
           } finally {
-            it.close()
+            i.close()
             con.close()
           }
       }
@@ -83,7 +91,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
 
         try{
           val appl = DiffApplier(self)
-          appl.applyChangesWithErr( it0.filterNot(_.isSame).zipIndexFrom(1), con, notice, cancel)    // cancel
+          appl.applyChange( it0.filterNot(_.isSame).zipIndexFrom(1), con, notice, cancel)    // cancel
         }
         finally {
           it0.close()
@@ -113,22 +121,6 @@ case class ComparePlan( table: TableInfo, // TableInfo,
       } finally {
         it0.close()
       }
-    }
-  }
-
-  def goApply(s2: DataSource,
-              it: Iterator[(Int, DiffRow)],
-              notice: ReportMsg => Unit,
-              mock: Boolean = false,
-              applDebug: Boolean = false
-             ): Unit = {
-
-    val con = if(mock) MockConnection() else s2.getConnection
-    try{
-      val appl = DiffApplier(this, debug = applDebug)
-      appl.applyChangesWithErr( it, con, notice, () => false)
-    } finally {
-      con.close()
     }
   }
 
@@ -165,7 +157,7 @@ case class ComparePlan( table: TableInfo, // TableInfo,
     try{
       val it = cancelableIt(it0, () => false, limit, this.name, notice)
       val appl = DiffApplier(this, debug = applDebug)
-      appl.applyChangesWithErr( it.filter(filterPred).zipIndexFrom(1), con, notice, () => false)
+      appl.applyChange( it.filter(filterPred).zipIndexFrom(1), con, notice, () => false)
 
     } finally {
       con.close()

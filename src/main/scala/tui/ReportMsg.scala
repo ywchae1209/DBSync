@@ -71,7 +71,7 @@ case class ReportMsgAp(name: String,
 case class ReportMsgApCancel(name: String, checkPoint: Int) extends ReportMsg
 {
   val status = Stop
-  def statusString = f"$nameStr $status%-8s cancel checkpoint(${checkPoint.toString.green})"
+  def statusString = f"$nameStr $status%-8s Stop checkpoint(${checkPoint.toString.green})"
 }
 
 case class ReportMsgApSkip(name: String, offset: Int, m: String) extends ReportMsg

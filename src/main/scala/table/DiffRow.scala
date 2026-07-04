@@ -12,6 +12,7 @@ sealed trait DiffRow {
   def isUpdate = DiffRow.isUpdate(this)
   def isDelete = DiffRow.isOnlyB(this)
   def isSame   = DiffRow.isSame(this)
+  def isNotSame   = !DiffRow.isSame(this)
 
   def keys: List[CVal]
   def serialize = DiffRowSerDe.serialize(this)

@@ -7,13 +7,15 @@ import tui.layoutzEx.JPromptShell._
 import tui.layoutzEx._
 import com.typesafe.scalalogging.Logger
 import schema.ComparePlan.jobLogger
-import _root_.table.{DiffRow, DiffRowSerDe}
+import _root_.table.{DiffApplier, DiffRow, DiffRowSerDe}
 import utils.LogHelper.getFileSzList
 import zio.Runtime
 import utils.Implicits._
 
+import java.io.{FileInputStream, InputStream}
 import java.nio.file.{Files, Paths}
 import scala.Console.println
+import scala.util.{Failure, Success, Try}
 
 object SyncTUI {
 
@@ -312,10 +314,10 @@ object SyncTUI {
     : Option[(String, String, String, Iterator[(Int, DiffRow)])]
     = {
       val ot = for{
-        path <- selectJcfPath()
-        name <- selectJcfFile(path)
-        full = Paths.get(path).resolve(name).toString
-      } yield ( (path, name, full) )
+        pn <- selectJcfPath()
+        fn <- selectJcfFile(pn)
+        full = Paths.get(pn).resolve(fn).toString
+      } yield ( (pn, fn, full) )
 
       ot.map{ case (_, _, full) =>
         val (pn, fn, full) = ot.get
@@ -333,15 +335,24 @@ object SyncTUI {
       }
     }
 
-    private def fileToView()(implicit inst: RuntimeShellInstance)
+    private def fileToView(o: Option[String])(implicit inst: RuntimeShellInstance)
     : Unit = {
       jcfStream("view file: ").foreach{ case (pn, fn, full, js) =>
+
+        val os = o.flatMap{ _ =>
+          val full1 = full + ".dat"
+          Try { new FileInputStream(full1) } match {
+            case Failure(e) => show(bullet + s"can't read ${full1.green} (${e.getMessage})"); None
+            case Success(v) => Some(v)
+          }
+        }
 
         val skey = "s q ESC".yellow
         val okey = "other-key".yellow
         display(bullet + s"press ${skey} to stop, $okey(ex: space) to see next")
 
-        js.grouped(5).foreach{ drs =>
+        val js0 = os.map( is => DiffApplier.extractDiffs(js, is, None)).getOrElse(js)
+        js0.grouped(5).foreach{ drs =>
           val stop = readForStopOr(inst.term)
           if(stop) return
           drs.foreach{ case (n, l) => display(bullet + n.toString.green + " : " + l.toPretty) }
@@ -350,7 +361,7 @@ object SyncTUI {
       }
     }
 
-    private def fileApplyAfter(offset: Int)(implicit inst: RuntimeShellInstance): Unit = {
+    private def fileApplyFrom(offset: Int, kind: Option[String] = None)(implicit inst: RuntimeShellInstance): Unit = {
       jcfStream(s"apply after ${offset}").foreach { case (pn, fn, full, js) =>
 
         val sc = tuiConf.load0(pn, Some(pn.drop(4))) match {
@@ -361,9 +372,22 @@ object SyncTUI {
           case None => return
         }
 
-        // todo :: g3nie
-        tuiConf.start_fa()
+        val cp = {
+          val tableName = fn.dropRight(8)
+          val out = sc.comparePlans.find(_.name == tableName)
+          if(out.isEmpty){
+            show(bullet + s"error : ${tableName.green} not found in conf.")
+            return
+          }
+          out.get
+        }
 
+        val kindPred = tuiConf.kindFilter(kind)
+        val f = tuiConf.comparedDataSourcesOr.map{ case (_, ds2) =>
+          cp.toApplyFromFile(ds2, full, kindPred, offset = Some(offset))
+        }
+
+        f.foreach( _.go(()=> false, rm => display(rm.statusString)) )
       }
     }
 
@@ -518,7 +542,7 @@ object SyncTUI {
       "\n" + bullet +"schema : d|def dn dk mkad mkbd mcad mcbd oad obd".brightGreen +
       "\n" + bullet +"plan   : p|plan pst sw ps[10] psa psd[n] pa[n] paa[iud] pad[n] pam[n]".brightGreen +
       "\n" + bullet +"job    : jn|jnew jl jlr|jld jla|jli jsa jsc js[name] jd" .brightGreen +
-      "\n" + bullet +"       : ja jad jam jcf jfv jfa jfad jfac[off] jfak[iud][pn] jfam" .brightGreen
+      "\n" + bullet +"       : ja jad jam jcf jfv[-d] jfa jfad jfac[off] jfak[iud][pn] jfam" .brightGreen
 
     def help() = display(helpStr)
 
@@ -583,9 +607,9 @@ object SyncTUI {
         case "jad"          => compareToApplyJob0(toIntOr(rest(0), 2), debug = true)
         case "jam"          => compareToApplyJob0(toIntOr(rest(0), 2), debug = true, mock = true)
         case "jcf"          => compareToFileJob(toIntOr(rest(0), 2))
-        case "jfv"          => fileToView()
-        case "jfa"          => fileToApplyJob(toIntOr(rest(0), 2))  // todo
-        case "jfac"         => fileApplyAfter(toIntOr(rest(0), 1))
+        case "jfv"          => fileToView(rest(0).filter(_ == "-d"))
+        case "jfa"          => fileToApplyJob(toIntOr(rest(0), 2))
+        case "jfac"         => fileApplyFrom(toIntOr(rest(0), 1), rest(1))
         case "jfak"         => fileToApplyJob(toIntOr(rest(1), 2), kind = rest(0))
         case "jfad"         => fileToApplyJob(toIntOr(rest(0), 2), applDebug = true)
         case "jfam"         => fileToApplyJob(toIntOr(rest(0), 2), applDebug = true, mock = true)
@@ -647,9 +671,9 @@ object SyncTUI {
       "jad [pn]"       -> "(job) pa with logging (to log-file)",
       "jam [pn]"       -> "(job) pad but, apply to mock-up(not target)",
       "jcf [pn]"       -> "(job) compare to file",
-      "jfv"            -> "(job) view stored file",
+      "jfv [-d]"       -> "(job) view stored file",
       "jfa [pn]"       -> "(job) file to apply",
-      "jfac [off]"     -> "(job) file to apply. continue after offset",     //  not-implemented yet.
+      "jfac [off][iud]"-> "(job) file to apply. continue after offset",
       "jfak [iud] [pn]"-> "(job) file to apply. selected kind(insert, update, delete).",
       "jfad [pn]"      -> "(job) file to apply with logging(to log-file)",
       "jfam [pn]"      -> "(job) jfad but apply to mock-up(not-target)",

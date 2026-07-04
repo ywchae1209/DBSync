@@ -1,6 +1,6 @@
 import scala.collection.Seq
 
-ThisBuild / version := "0.9.9"
+ThisBuild / version := "0.1.0"
 
 ThisBuild / scalaVersion := "2.13.18"
 
