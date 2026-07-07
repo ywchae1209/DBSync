@@ -33,9 +33,38 @@ val DEFAULT_REL_TOL = 1e-12     // 상대 오차
 * 동기화 도구의 목적에 따라 문자열 비교를 함.
 * 비교하지 않는 게 맞는 건지 애매함. Oracle전문가의 의견 필요
 
+## schema 정보 읽어오는 sql
+DBSync initialize시에 schema읽어오는 동작.
 
+* ojdbc API이용하는 경우 (아래).
+  - 처리시간이 지나치게 오래 걸리는 경우가 있어서 아래의 sql방식으로 수정함.
+```scala
+// meta: DatabaseMetaData
+meta.getIndexInfo(null, schema, table, true, false)
+meta.getPrimaryKeys(null, schema, table)
+```
 
-
-  
+* primary key
+```sql
+      SELECT cols.column_name, cols.position
+       FROM all_constraints cons
+       JOIN all_cons_columns cols
+         ON cons.constraint_name = cols.constraint_name
+        AND cons.owner = cols.owner
+      WHERE cons.constraint_type = 'P'
+        AND cons.owner = ?
+        AND cons.table_name = ?
+```
+* unique key
+```sql
+      SELECT ind.index_name, col.column_name, col.column_position
+       FROM all_indexes ind
+       JOIN all_ind_columns col
+         ON ind.index_name = col.index_name
+        AND ind.owner = col.index_owner
+      WHERE ind.uniqueness = 'UNIQUE'
+        AND ind.table_owner = ?
+        AND ind.table_name = ?
+```
   
 
