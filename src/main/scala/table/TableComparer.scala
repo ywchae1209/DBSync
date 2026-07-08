@@ -18,13 +18,13 @@ case class TableComparer(plan: ComparePlan,
                          reportInterval: Int = 512,
                          isDebug: Boolean = false) {
 
-  def debugMemo(s: => String) = if(isDebug) memo(s)
+  def debugMemo(s: => String):Unit = if(isDebug) memo(s)
 
   def compareIt(srcDs: DataSource,
                 tgtDs: DataSource,
                 notice: ReportMsg => Unit): Iterator[DiffRow] with AutoCloseable = {
 
-    def report(r1:Long, r2:Long, s:Long, u:Long, a:Long, b:Long, m: String, state: TaskStatus)
+    def report(r1:Long, r2:Long, s:Long, u:Long, a:Long, b:Long, m: String, state: TaskStatus): Unit
     = {
       val rm = ReportMsgIt(plan.name, r1, r2, s, u, a, b, m, state)
       noticeWithLog(notice)(rm)
@@ -41,7 +41,7 @@ case class TableComparer(plan: ComparePlan,
 
     val msgStart = ReportMsgTime(plan.name, "start")
     noticeWithLog(notice)(msgStart)
-    def elapseLog(msg: String) = noticeWithLog(notice)(ReportMsgElapse(plan.name, msgStart, msg))
+    def elapseLog(msg: String): Unit = noticeWithLog(notice)(ReportMsgElapse(plan.name, msgStart, msg))
 
     val srcRs = srcStmt.executeQuery()
     val tgtRs = tgtStmt.executeQuery()
@@ -228,8 +228,8 @@ case class TableComparer(plan: ComparePlan,
     while (colIt.hasNext) {
       val (comp, colA, colB) = colIt.next()
       val eq = comp.equal(srcRow(colA - 1), tgtRow(colB - 1))
-      if (debug && !eq) {
-        note("diff: " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))
+      if (!eq) {
+        if(debug) note("diff: " + srcRow(colA - 1) + " ---" + tgtRow(colB - 1))
         return false
       }
     }

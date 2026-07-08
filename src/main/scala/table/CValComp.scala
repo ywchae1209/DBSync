@@ -84,6 +84,19 @@ case class CValComp(colA: CReader,
 
 object CValComp {
 
+  // 기본 tolerance
+  // ================================================================================
+  var doubleTolerance = Some(DeltaDouble(1e-7))
+  var timeTolerance = Some(DeltaMillis(1))
+  // 1e-15  double precision 한계
+  // 1e-12  JVM/ojdbc 흔한 오차
+  // 1e-9   generous 오차 (1000배 여유)
+  // 1e-6   GIS meter 수준 (≈ mm~cm)
+  // --------------------------------------------------------------------------------
+  var geoAbsTolerance = DeltaDouble(1e-9)
+  var geoRelTolerance = DeltaDouble(1e-9)
+  // ================================================================================
+
   def isEqual(a: CVEquatable, b: CVEquatable): Boolean = (a, b) match {
     case (CBoolean(_, x), CBoolean(_, y))             => x == y
     case (CBytes(_, x), CBytes(_, y))                 => util.Arrays.equals(x, y)
@@ -121,18 +134,11 @@ object CValComp {
   import oracle.spatial.geometry.JGeometry
 
 
-  // 기본 tolerance ---------------------------------
-  // 1e-15  double precision 한계
-  // 1e-12  JVM/ojdbc 흔한 오차
-  // 1e-9   generous 오차 (1000배 여유)
-  // 1e-6   GIS meter 수준 (≈ mm~cm)
-  val DEFAULT_ABS_TOL = 1e-9      // 절대 오차
-  val DEFAULT_REL_TOL = 1e-12     // 상대 오차
 
   def fastEquals( a: JGeometry,
                   b: JGeometry,
-                  absTol: Double = DEFAULT_ABS_TOL,
-                  relTol: Double = DEFAULT_REL_TOL ): Boolean = {
+                  absTol: Double = geoAbsTolerance.asDouble,
+                  relTol: Double = geoRelTolerance.asDouble): Boolean = {
 
     if (a eq b) return true
     if (a == null || b == null) return false

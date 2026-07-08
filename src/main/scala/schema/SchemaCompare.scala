@@ -270,7 +270,7 @@ object SchemaCompared {
 
   def headerAndRows(l: Seq[TableInfo]) = {
     val rows: Seq[Seq[Element]] = l.map(t => rowElements(t) )
-    val hdr = Seq("Table", "Key","Col#", "#Source", "$Target")
+    val hdr = Seq("Table", "Key","Col#", "#Source", "#Target")
 
     hdr -> rows
   }
