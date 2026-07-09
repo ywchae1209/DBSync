@@ -1,6 +1,6 @@
 package table
 
-import oracle.jdbc.OracleConnection
+import oracle.jdbc.{OracleConnection, OracleTypes}
 import schema.ComparePlan
 import table.DiffApplier.bindRow
 import tui.ReportMsg.noticeWithLog
@@ -258,7 +258,8 @@ object DiffApplier {
             doubleBind(idx => stmt.setBigDecimal(idx, new java.math.BigDecimal(value.bigInteger)))
 
           case CDouble(_, value) => log(s"setDouble($value)")
-            doubleBind(idx => stmt.setDouble(idx, value))
+//            doubleBind(idx => stmt.setDouble(idx, value))
+            doubleBind(idx => stmt.setObject(idx, value, OracleTypes.BINARY_DOUBLE))
 
           case CDecimal(_, value) => log(s"setBigDecimal($value)")
             doubleBind(idx => stmt.setBigDecimal(idx, value.bigDecimal))

@@ -1,6 +1,8 @@
 package table
 
+import tui.ReportMsg.noticeWithLog
 import tui.ReportMsgStop
+import tui.SyncTUI.bullet
 import tui.TaskStatus._
 import tui.layoutzEx.StringWithColor
 
@@ -82,7 +84,7 @@ object DiffRowSerDe {
   import java.io.{FileInputStream, FileOutputStream}
   import scala.util.Using
 
-  def readDiffRows( path: String ) = {
+  def readDiffRows( path: String ): Either[Throwable, Iterator[DiffRow] with AutoCloseable] = {
     Try {
       val fis = new FileInputStream(path)
       val unpacker: MessageUnpacker = MessagePack.newDefaultUnpacker(fis)
@@ -120,7 +122,7 @@ object DiffRowSerDe {
         rows.foreach { row =>
           if(cancel()) {
             packer.flush()
-            callback( ReportMsgStop(name, s"[Write Stopped] $path (written: $total) by user") )
+            noticeWithLog(callback)( ReportMsgStop(name, bullet + "write stopped by user. " + s"${path.green}(written: $total)") )
             return Right(total)
           }
           total = total + 1

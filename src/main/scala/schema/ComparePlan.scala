@@ -10,7 +10,7 @@ import table._
 import tui.SyncTUI.bullet
 import tui.layoutzEx._
 import tui._
-import utils.Implicits.IterWithZip
+import utils.Implicits.{IterWithZip, IterWithZip0}
 import zio.json.{DeriveJsonCodec, JsonCodec}
 
 import java.io.FileOutputStream

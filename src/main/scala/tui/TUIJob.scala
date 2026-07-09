@@ -44,9 +44,37 @@ case class Running( task: TUITask,
                     fiber: Fiber.Runtime[Nothing, Unit],
                     cancelFlag: AtomicBoolean )
 
+// --------------------------------------------------------------------------------
+// simple ringBuffer not thread-safe
+//case class RingBuffer[A](size: Int = 5) {
+//  private val buffer = new Array[A](size)
+//  private var idx = 0
+//  private var count = 0
+//
+//  def add(rm: A): Unit = {
+//    buffer(idx) = rm
+//    idx = (idx + 1) % size
+//    if (count < size) count += 1
+//  }
+//
+//  def getAll: Seq[A] = {
+//    val start = if (count < size) 0 else idx
+//    (0 until count).map(i => buffer((start + i) % size))
+//  }
+//
+//  def getLatest: Option[A] = {
+//    if (count == 0) None
+//    else {
+//      val latestIdx = if (idx == 0) size - 1 else idx - 1
+//      Some(buffer(latestIdx))
+//    }
+//  }
+//}
+
 case class JobTUIBarStates(report: ReportMsg => Unit) extends TUIBarStates {
 
   private val runningState: ConcurrentHashMap[String,ReportMsg] = new ConcurrentHashMap[String, ReportMsg]()
+
   val reportToMe : ReportMsg => Unit
   = rm => {
     runningState.put(rm.name, rm)
@@ -61,7 +89,6 @@ case class JobTUIBarStates(report: ReportMsg => Unit) extends TUIBarStates {
   }
 
   def currentState() = runningState.toMap
-  def showCurrentState() = currentState().foreach(println)
 }
 
 // --------------------------------------------------------------------------------

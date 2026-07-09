@@ -93,11 +93,11 @@ object CReader {
     OracleTypes.TINYINT         -> getAsInt,
     OracleTypes.BIT             -> getAsInt,
 
-    OracleTypes.BINARY_DOUBLE   -> getAsDouble,
-    OracleTypes.DOUBLE          -> getAsDouble,
+    OracleTypes.BINARY_DOUBLE   -> getAsDouble,   // <<<
+    OracleTypes.DOUBLE          -> getAsDouble,   // <<<
     OracleTypes.BINARY_FLOAT    -> handleFloat,
     OracleTypes.FLOAT           -> handleFloat,
-    OracleTypes.REAL            -> getAsDouble,
+    OracleTypes.REAL            -> getAsDouble,   // <<<
 
     OracleTypes.VARCHAR         -> getAsString,
     OracleTypes.CHAR            -> getAsString,
@@ -195,8 +195,11 @@ object CReader {
 
   // 오라클 DATE는 시분초를 포함: LocalDateTime(CTimestamp)으로 읽어야 함.
   def getAsTimestamp(cs: CReader): ResultSet => CVal = rs => {
-    val ts = rs.getTimestamp(cs.index)
-    if (ts == null) CNull(cs.index) else CTimestamp(cs.index, ts.toLocalDateTime)
+
+    val t = rs.getObject(cs.index, classOf[LocalDateTime])
+    if(t == null) CNull(cs.index) else CTimestamp(cs.index, t)
+//    val ts = rs.getTimestamp(cs.index)
+//    if (ts == null) CNull(cs.index) else CTimestamp(cs.index, ts.toLocalDateTime)
   }
 
   // --- 동등성 비교 (CVEquatable) ---
@@ -270,8 +273,8 @@ object CReader {
    * 오라클 DB 자체에는 "날짜 정보가 없는 순수 시간(TIME) 타입"이 존재하지 않음
    * 오라클 DATE: 이름은 Date지만 사실 '날짜 + 시분초' (CTimestamp가 처리)
    * 오라클 TIMESTAMP: '날짜 + 시분초 + 소수점 초' (CTimestamp가 처리)
-   * 오라클 INTERVAL DAY TO SECOND: 시간의 양(Duration)을 나타내며, 보통 문자열(CInterval)로 처리합니다.
-   * 따라서 일반적인 오라클 테이블 비교에서는 getAsTime이나 getAsOffsetTime이 호출될 일이 거의 없습니다.
+   * 오라클 INTERVAL DAY TO SECOND: 시간의 양(Duration)을 나타내며, 보통 문자열(CInterval)로 처리
+   * 따라서 일반적인 오라클 테이블 비교에서는 getAsTime이나 getAsOffsetTime이 호출될 일이 없음
    */
   def getAsTime(cs: CReader): ResultSet => CVal
   = rs => {

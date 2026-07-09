@@ -311,7 +311,7 @@ object SyncTUI {
     }
 
     private def jcfStream(prefix: String)(implicit inst: RuntimeShellInstance)
-    : Option[(String, String, String, Iterator[(Int, DiffRow)])]
+    : Option[(String, String, String, Iterator[(Int, DiffRow)] with AutoCloseable)]
     = {
       val ot = for{
         pn <- selectJcfPath()
@@ -326,9 +326,7 @@ object SyncTUI {
 
         val ret = DiffRowSerDe.readDiffRows(full)
           .fold(
-            e => {
-              display(bullet + e.getMessage); Iterator.empty
-            },
+            e => { display(bullet + e.getMessage); emptyIterator },
             r => r.zipIndexFrom(1))
 
         (pn, fn, full, ret)
@@ -358,6 +356,7 @@ object SyncTUI {
           drs.foreach{ case (n, l) => display(bullet + n.toString.green + " : " + l.toPretty) }
         }
         show(bullet + "done(file view):" + full.cyan)
+        js.close()
       }
     }
 
@@ -387,7 +386,11 @@ object SyncTUI {
           cp.toApplyFromFile(ds2, full, kindPred, offset = Some(offset))
         }
 
-        f.foreach( _.go(()=> false, rm => display(rm.statusString)) )
+        try{
+          f.foreach( _.go(()=> false, rm => display(rm.statusString)) )
+        } finally {
+          js.close()
+        }
       }
     }
 
