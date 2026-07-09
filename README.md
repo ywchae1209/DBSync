@@ -1,7 +1,7 @@
 # Internals
 ## 컬럼타입별 비교
 ### Geometry
-* 오라클 고유의 타입
+* **오라클 고유의 타입**
 1. 컬럼값 읽기
   * `oracle.spatial.geometry.JGeometry.load` 사용
 
@@ -23,6 +23,7 @@ val DEFAULT_ABS_TOL = 1e-9      // 절대 오차
 val DEFAULT_REL_TOL = 1e-12     // 상대 오차
 ```
 ### XML
+* SQL:2003의 표준 컬럼타입(ISO/IEC 9075-14:2023)
 * XML비교는 3가지 방법이 가능
   1. 문자열 비교 (틀릴 가능성 매우 높으나 가장빠름) ~> 채택하면 곤란
   2. **무의미한 요소 제거후 문자열 비교** ( 순서가 달라질 경우 틀린 결과)
@@ -33,6 +34,21 @@ val DEFAULT_REL_TOL = 1e-12     // 상대 오차
 ### ROWID, BFILE
 * 동기화 도구의 목적에 따라 문자열 비교를 함.
 * 비교하지 않는 게 맞는 건지 애매함. Oracle전문가의 의견 필요
+
+### 실수형 오라클 고유타입 Issue
+* 아래는 오라클 고유의 컬럼타입으로, 처리 중 side-effect가 발생할 수 있다.
+
+### 1. BINARY_FLOAT
+* ojdbc API내의 형변환으로 **10^-7이내의 오차발생**할 수 있음.
+
+### BINARY_DOUBLE
+* ojdbc setDouble함수의 제한으로 **overflow 발생할 수 있음.**
+
+```
+오버플로우 발생 범위
+value > 9.99999999999999E+125 또는
+value < -9.99999999999999E+125
+```
 
 ## schema 정보 읽어오는 sql
 DBSync initialize시에 schema읽어오는 동작.
