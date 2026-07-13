@@ -96,7 +96,7 @@ object TableInfo {
   // --------------------------------------------------------------------------------
   def apply0(conn: Connection, schema: String, table: String): TableInfo = {
     val pkMap = getPrimaryKeyMap0(conn, schema, table)
-    val cols = getColumns(conn.g, schema, table, pkMap)
+    val cols = getColumns(conn, schema, table, pkMap)
     val pkCols = pkMap.toList.sortBy(_._2).map(_._1)
 
     val primaryKey = if (pkCols.nonEmpty) Some(KeyCol("PRIMARY", pkCols)) else None
