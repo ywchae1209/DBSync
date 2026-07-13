@@ -96,7 +96,7 @@ object TableInfo {
   // --------------------------------------------------------------------------------
   def apply0(conn: Connection, schema: String, table: String): TableInfo = {
     val pkMap = getPrimaryKeyMap0(conn, schema, table)
-    val cols = getColumns(conn.getMetaData, schema, table, pkMap)
+    val cols = getColumns(conn.g, schema, table, pkMap)
     val pkCols = pkMap.toList.sortBy(_._2).map(_._1)
 
     val primaryKey = if (pkCols.nonEmpty) Some(KeyCol("PRIMARY", pkCols)) else None
@@ -115,7 +115,7 @@ object TableInfo {
     val meta = conn.getMetaData
 
     val pkMap = getPrimaryKeyMap(meta, schema, table)
-    val cols = getColumns(meta, schema, table, pkMap)
+    val cols = getColumns(conn, schema, table, pkMap)
     val pkCols = pkMap.toList.sortBy(_._2).map(_._1)
 
     val primaryKey = if (pkCols.nonEmpty) Some(KeyCol("PRIMARY", pkCols)) else None
@@ -133,7 +133,47 @@ object TableInfo {
     }.toMap
   }
 
-  private def getColumns(meta: DatabaseMetaData, schema: String, table: String, pkMap: Map[String, Int]): List[ColInfo] = {
+  import java.sql.{Connection, PreparedStatement, ResultSet}
+
+  private def getColumns(conn: Connection, schema: String, table: String, pkMap: Map[String, Int])
+  : List[ColInfo] = {
+
+    val fullTableName = Option(schema).filter(_.nonEmpty).map(s => s"$s.$table").getOrElse(table)
+    val sql = s"SELECT * FROM $fullTableName WHERE 1 = 0"
+
+    var pstmt: PreparedStatement = null
+    var rs: ResultSet = null
+
+    try {
+      pstmt = conn.prepareStatement(sql)
+      rs = pstmt.executeQuery()
+
+      val meta = rs.getMetaData
+      val columnCount = meta.getColumnCount
+
+      (1 to columnCount).iterator.map { i =>
+        val name = meta.getColumnName(i)
+
+        ColInfo(
+          databaseProductName = "Oracle",
+          name                = name,
+          schemaName          = Option(schema),
+          jdbcType            = meta.getColumnType(i),
+          typeName            = meta.getColumnTypeName(i),
+          precision           = meta.getPrecision(i),
+          scale               = meta.getScale(i),
+          isNullable          = meta.isNullable(i) == java.sql.ResultSetMetaData.columnNullable,
+          ordinalPos          = i,
+          pkOrdinal           = pkMap.get(name)
+        )
+      }.toList
+    } finally {
+      if (rs != null) rs.close()
+      if (pstmt != null) pstmt.close()
+    }
+  }
+
+  private def getColumns0(meta: DatabaseMetaData, schema: String, table: String, pkMap: Map[String, Int]): List[ColInfo] = {
     meta.getColumns(null, schema, table, "%").mapIter { r =>
       val name = r.getString("COLUMN_NAME")
       ColInfo(

@@ -61,10 +61,10 @@ object CReader {
 
   private val handleNumber: CReader => (ResultSet => CVal) = cs => {
     if (cs.scale == 0) {
-      if (cs.precision < 10) getAsInt(cs)
-      else if (cs.precision < 19) getAsLong(cs)
-      else getAsBigInt(cs)
-    } else getAsDecimal(cs)
+      if (cs.precision < 10) getAsInt(cs) // getInt
+      else if (cs.precision < 19) getAsLong(cs) // getLong
+      else getAsBigInt(cs)    // getBigDecimal
+    } else getAsDecimal(cs) // getBigDecimal
   }
 
   private val handleNotSupport: CReader => (ResultSet => CVal) = cs => _ => {
